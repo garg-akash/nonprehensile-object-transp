@@ -97,6 +97,8 @@ private:
     KDL::ChainFkSolverPos_recursive* fkSol_;
     KDL::ChainFkSolverVel_recursive* fkVelSol_;
     KDL::ChainJntToJacDotSolver* jntJacDotSol_;
+    KDL::ChainIkSolverPos_NR_JL* ikSol_;
+    KDL::ChainIkSolverVel_wdls* ikVelSol_;
 
     // joints
     void updateJnts(std::vector<double> _jnt_values, std::vector<double> _jnt_vel);

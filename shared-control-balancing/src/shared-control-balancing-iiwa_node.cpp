@@ -19,6 +19,11 @@
 #include "gazebo_msgs/SetModelConfiguration.h"
 #include <std_srvs/Empty.h>
 
+#include <casadi/casadi.hpp>
+#include <math.h>
+#include <chrono>
+#include <eigen_conversions/eigen_kdl.h>
+
 #define USE_SHARED_CNTR 1
 #define USE_JNT_ID 1
 #define DEBUG 0
@@ -29,7 +34,171 @@ std::vector<double> jnt_pos(7,0.0), jnt_vel(7,0.0), obj_pos(6,0.0),  obj_vel(6,0
 bool robot_state_available = false, obj_state_available = false;
 double obj_mass;
 Eigen::Matrix3d obj_inertia = Eigen::Matrix3d::Identity();
+const int n_states = 29;
+const int n_controls = 16;
+const int MPC_HORIZON = 3;
+//MPC Fucntions
+Eigen::MatrixXd combinedM(const Eigen::MatrixXd &M_m, const Eigen::MatrixXd &M_o, const Eigen::MatrixXd &iJb)//,iJb,M_m);
+{
+    Eigen::Matrix<double,6,6> M = iJb.transpose()*M_m*iJb + M_o;
+    return M;
+}
+Eigen::MatrixXd combinedC(const Eigen::MatrixXd &M_m,const Eigen::MatrixXd &C_m,const Eigen::MatrixXd &C_o,const Eigen::MatrixXd &iJb,const Eigen::MatrixXd &diJb)
+{
+    Eigen::Matrix<double,6,6> C = iJb.transpose()*(C_m*iJb + M_m*diJb) + C_o;
+    return C;
+}
+Eigen::VectorXd combinedN(const Eigen::VectorXd &N_m,const Eigen::VectorXd &N_o,const Eigen::MatrixXd &iJb)
+{
+    Eigen::VectorXd N = iJb.transpose()*N_m + N_o;
+    return N;
+}
+casadi::DM toCasadi(const Eigen::VectorXd &eig_vec)
+{
+    casadi::DM dm_mat(casadi::Sparsity::dense(eig_vec.size()));  
+    std::copy(eig_vec.data(), eig_vec.data() + eig_vec.size(), dm_mat.ptr());
+    // std::cout<<"dm:: "<<dm_mat<<std::endl;
+    return dm_mat;
+}
+// void toEigen(const casadi::DM &dm_mat)
+// {
+//     auto vector_x = static_cast<std::vector<double>>(dm_mat);
+//     // int sz = dm_mat.size1();
+//     // Eigen::VectorXd eig_vec(sz);
+//     // eig_vec << vector_x.data();
+//     Eigen::Matrix<float, 2*n_states+n_controls, 1> eig_vec(vector_x.data());
+//     // std::cout<<"cas:: "<<eig_vec<<std::endl;
+//     // std::cout<<"to eigen "<<vector_x.data()<<std::endl;
+//     //return eig_vec;
+// }
+Eigen::Matrix3d zyx2R(const Eigen::VectorXd &v){ //euler to rotation matrix
+    float c_x = cos(v[2]);
+    float s_x = sin(v[2]);
+    float c_y = cos(v[1]);
+    float s_y = sin(v[1]);
+    float c_z = cos(v[0]);
+    float s_z = sin(v[0]);
+  
+    Eigen::Matrix3d rot_z, rot_y, rot_x, R;
+    rot_z << c_z, -s_z, 0,
+            s_z, c_z, 0,
+            0, 0, 1;
 
+    rot_y << c_y, 0, s_y,
+            0, 1, 0,
+            -s_y, 0, c_y;
+
+    rot_x << 1, 0, 0,
+            0, c_x, -s_x,
+            0, s_x, c_x;
+
+    R << rot_z*rot_y*rot_x;
+    return R;       
+}
+Eigen::Matrix3d zyx2E(const Eigen::VectorXd &v){ //coeff matrix to convert derivatives of euler to ang vel 
+    Eigen::Matrix3d E;
+    E << 0, sin(v[2])/cos(v[1]), cos(v[2])/cos(v[1]),
+         0, cos(v[2]), -sin(v[2]),
+         1, sin(v[2])*sin(v[1])/cos(v[1]), cos(v[2])*sin(v[1])/cos(v[1]);
+    return E;
+}
+std::vector<double> ref(const Eigen::VectorXd &oZYX, const std::vector<trajectory_point> &p_future)
+{
+    std::vector<double> pVEC_ref;
+    Eigen::Matrix3d R = zyx2R(oZYX);
+    Eigen::Vector3d vel_b;
+    for (int i = 0; i < MPC_HORIZON; ++i)
+    {   
+        for (int j = 0; j < p_future[i].pos.size(); j++)
+            pVEC_ref.push_back(p_future[i].pos[j]);
+
+        pVEC_ref.push_back(0);
+        pVEC_ref.push_back(0);
+        pVEC_ref.push_back(0);
+
+        vel_b = R.transpose()*p_future[i].vel;
+        for (int j = 0; j < p_future[i].vel.size(); j++)
+            pVEC_ref.push_back(vel_b[j]);
+        pVEC_ref.push_back(0);
+        pVEC_ref.push_back(0);
+        pVEC_ref.push_back(0);
+        pVEC_ref.push_back(9.8);
+        for (int j = 0; j < 16; j++)
+            pVEC_ref.push_back(0);
+        for (int j = 0; j < n_controls; ++j)
+            pVEC_ref.push_back(0);
+    }
+    return pVEC_ref;
+}    
+void shift(float h, float &t0, Eigen::VectorXd &x0, Eigen::Matrix<double,MPC_HORIZON,n_controls> &u0, const Eigen::MatrixXd &sol_ct_first, const Eigen::MatrixXd &sol_ct_rest, const Eigen::MatrixXd &sol_ct_last, const Eigen::VectorXd &rhs)
+{
+    Eigen::VectorXd xNew(n_states);
+    for (int i = 0; i < rhs.size(); ++i)
+    {
+      xNew[i] = x0[i] + rhs[i]*h;
+    }
+    x0 = xNew;
+    if (MPC_HORIZON > 1)  
+        u0 << sol_ct_rest, sol_ct_last;
+    else
+        u0 << sol_ct_first;
+    t0 = t0 + h;
+}
+void removeRow(Eigen::MatrixXd& matrix, unsigned int rowToRemove)
+{
+    unsigned int numRows = matrix.rows()-1;
+    unsigned int numCols = matrix.cols();
+    if( rowToRemove < numRows )
+        matrix.block(rowToRemove,0,numRows-rowToRemove,numCols) = matrix.block(rowToRemove+1,0,numRows-rowToRemove,numCols);
+
+    matrix.conservativeResize(numRows,numCols);
+}
+void removeColumn(Eigen::MatrixXd& matrix, unsigned int colToRemove)
+{
+    unsigned int numRows = matrix.rows();
+    unsigned int numCols = matrix.cols()-1;
+
+    if( colToRemove < numCols )
+        matrix.block(0,colToRemove,numRows,numCols-colToRemove) = matrix.block(0,colToRemove+1,numRows,numCols-colToRemove);
+    matrix.conservativeResize(numRows,numCols);
+}
+void fromEigenToKDL(const Eigen::Matrix4d &e, KDL::Frame &k)
+{
+  for (unsigned int i = 0; i < 3; ++i)
+    k.p[i] = e(i, 3);
+  for (unsigned int i = 0; i < 9; ++i)
+    k.M.data[i] = e(i/3, i%3);
+}
+void fromKDLToEigen(const KDL::Frame &k, Eigen::Matrix4d &e)
+{
+  // translation
+  for (unsigned int i = 0; i < 3; ++i)
+    e(i, 3) = k.p[i];
+
+  // rotation matrix
+  for (unsigned int i = 0; i < 9; ++i)
+    e(i/3, i%3) = k.M.data[i];
+
+  // "identity" row
+  e(3,0) = 0.0;
+  e(3,1) = 0.0;
+  e(3,2) = 0.0;
+  e(3,3) = 1.0;
+}
+std::vector<double> fromKDLToVec(const KDL::JntArray k)
+{
+    std::vector<double> v;
+    for (int i = 0; i < 7; ++i)
+        v.push_back(k.data[i]);
+    return v;
+}
+KDL::JntArray fromVecToKDL(std::vector<double> &v)
+{
+    KDL::JntArray k(7);
+    for (int i = 0; i < 7; ++i)
+        k.data[i] = v[i];
+    return k;
+}
 // Functions
 KDLRobot createRobot(ros::NodeHandle &_n)
 {
@@ -88,7 +257,20 @@ int main(int argc, char **argv)
 
     // Rate
     ros::Rate loop_rate(500);
-
+    //modified [mpc parameters]
+    const int n_jnts = 7;
+    int n_total = n_states + n_controls;
+    int mpciter = 0;
+    float t0 = 0;
+    float h = 0.1;
+    std::vector<float> t_mpc;
+    t_mpc.push_back(t0);
+    float epsilon_t = 1e-3;
+    //include solver
+    std::string path = "/home/akash/Documents/waiter-robot-mpc/Software/matlab/extraFiles/";
+    casadi::Function solv = casadi::nlpsol("solv", "ipopt", path + "nlpN3.so"); //loading solver
+    casadi::Function fDYN = casadi::external("f"); //loading the dynamics fucntion
+    //modified [mpc parameters]
     // Subscribers
     ros::Subscriber joint_state_sub = n.subscribe("/lbr_iiwa/joint_states", 1, jointStateCallback);
     ros::Subscriber object_state_sub = n.subscribe("/gazebo/link_states", 1, objectStateCallback);
@@ -257,7 +439,160 @@ int main(int argc, char **argv)
     double traj_duration = 2, acc_duration = 1, t = 0.0, init_time_slot = 0.0;
     KDLPlanner planner(traj_duration, acc_duration, init_position, end_position);
     trajectory_point p = planner.compute_trajectory(t);
+    //***************modified [mpc parameters]*******************
+    std::vector<trajectory_point> p_future(MPC_HORIZON); 
+    //casadi::DM x0 = {p.pos[0],p.pos[1],p.pos[2],0,0,0,p.vel[0],p.vel[1],p.vel[2],0,0,0,9.8};
+    // casadi::DM x0 = casadi::DM::zeros(n_states,1);
+    Eigen::VectorXd x0 = Eigen::VectorXd::Zero(n_states);
+    for (int i = 0; i < 3; ++i)
+        x0(i) = p.pos[i]; 
+    Eigen::Vector3d oZYX;
+    oZYX << x0[4], x0[5], x0[6];
+    Eigen::Vector3d vel_b = zyx2R(oZYX).transpose()*p.vel;
+    for (int i = 0; i < 3; ++i)
+        x0(i+6) = vel_b[i];
+    x0(12) = 9.8;
+    std::cout<<"#############x0#################"<<x0<<std::endl;
+    // Eigen::VectorXd xx = Eigen::VectorXd::Zero(n_states);
+    // xx << x0;
+    std::vector<double> xx(x0.data(), x0.data() + x0.rows() * x0.cols());
+    Eigen::Matrix<double,100,n_states> xx_out = Eigen::Matrix<double,100,n_states>::Zero();
+    xx_out.row(mpciter) << x0.transpose();
+    Eigen::VectorXd x_prev = Eigen::VectorXd::Zero(n_states);
+    Eigen::Matrix<double,MPC_HORIZON,n_controls> u0 = Eigen::Matrix<double,MPC_HORIZON,n_controls>::Zero();
+    Eigen::Matrix<double,MPC_HORIZON+1,n_states> X0 = Eigen::Matrix<double,MPC_HORIZON+1,n_states>::Zero();
+    for (int i = 0; i < MPC_HORIZON+1; ++i)
+    {
+        for (int j = 0; j < n_states; ++j)
+            X0(i,j) = x0[j];
+    }
+    std::cout<<"#############X0#################"<<X0<<std::endl;
+    Eigen::Matrix<double,6,7> Jb;
+    Eigen::Matrix<double,7,6> Jb_t; //transpose of Jb
+    Eigen::Matrix<double,7,6> iJb; //inverse of Jb
+    Eigen::Matrix<double,7,6> diJb;
+    Eigen::VectorXd args_x0 = Eigen::VectorXd::Zero(n_states+MPC_HORIZON*n_total);
+    Eigen::Matrix<double,6,6> M_; //to strore the combined inertia matrix
+    Eigen::Matrix<double,6,6> Co; //to strore the obj coriolis matrix
+    Eigen::VectorXd No; //to strore the obj gravity matrix
+    Eigen::Matrix<double,6,6> C_; //to strore the combined coriolis matrix
+    Eigen::VectorXd N_; //to strore the combined gravity matrix
+    Eigen::Matrix<double,7,1> tau_mpc;
+    // std::cout<<"#############M_combined#################"<<M_<<std::endl;
+    // std::cout<<"#############C_combined#################"<<C_<<std::endl;
+    // std::cout<<"#############N_combined#################"<<N_<<std::endl;
 
+    std::vector<double> pVEC_ref; //std vector because we want to push x0 u0 alternately
+    Eigen::VectorXd pVEC_ref_; //to keep converted std vector to eigen vector
+    Eigen::VectorXd pVEC(162+n_states+MPC_HORIZON*n_total); //to keep the entire p argument
+    // bounds for states and controls
+    Eigen::VectorXd st_lbx = Eigen::VectorXd::Zero(n_states);
+    st_lbx << -10,-10,-10,-M_PI,-M_PI/2,-M_PI,-5,-5,-5,-M_PI,-M_PI,-M_PI,9.8,Eigen::VectorXd::Zero(n_controls);
+    Eigen::VectorXd st_ubx = Eigen::VectorXd::Zero(n_states);
+    st_ubx << 10,10,10,M_PI,M_PI/2,M_PI,5,5,5,M_PI,M_PI,M_PI,9.8,50*Eigen::VectorXd::Ones(n_controls);
+    Eigen::VectorXd ct_lbx = -1000*Eigen::VectorXd::Ones(n_controls);
+    Eigen::VectorXd ct_ubx = 1000*Eigen::VectorXd::Ones(n_controls);
+    Eigen::VectorXd lbx(n_states+MPC_HORIZON*n_total);
+    Eigen::VectorXd ubx(n_states+MPC_HORIZON*n_total);
+    for (int i = 0; i < MPC_HORIZON+1; ++i)
+    {
+        for (int j = 0; j < n_states; ++j)
+        {
+            lbx(i*n_states+j) = st_lbx(j);
+            ubx(i*n_states+j) = st_ubx(j);
+        }
+    }
+    for (int i = 0; i < MPC_HORIZON; ++i)
+    {
+        for (int j = 0; j < n_controls; ++j)
+        {
+            lbx((MPC_HORIZON+1)*n_states+i*n_controls+j) = ct_lbx(j);
+            ubx((MPC_HORIZON+1)*n_states+i*n_controls+j) = ct_ubx(j);
+        }
+    }
+    // bounds for constaints
+    Eigen::VectorXd st_lbg = -1e-20*Eigen::VectorXd::Ones(n_states);
+    Eigen::VectorXd tau_lbg = -500*Eigen::VectorXd::Ones(n_jnts);
+    Eigen::VectorXd st_ubg = 1e-20*Eigen::VectorXd::Ones(n_states);
+    Eigen::VectorXd tau_ubg = 500*Eigen::VectorXd::Ones(n_jnts);
+    Eigen::VectorXd lbg(n_states+MPC_HORIZON*(n_states+n_jnts));
+    Eigen::VectorXd ubg(n_states+MPC_HORIZON*(n_states+n_jnts));
+    for (int i = 0; i < n_states; ++i)
+    {
+        lbg(i) = st_lbg(i);
+        ubg(i) = st_ubg(i);
+    }
+    for (int i = 0; i < MPC_HORIZON; ++i)
+    {
+        for (int j = 0; j < n_states; ++j)
+        {
+            lbg((i+1)*n_states+i*n_jnts+j) = st_lbg(j);
+            ubg((i+1)*n_states+i*n_jnts+j) = st_ubg(j);
+        }
+        for (int k = 0; k < n_jnts; ++k)
+        {
+            lbg((i+2)*n_states+i*n_jnts+k) = tau_lbg(k);
+            ubg((i+2)*n_states+i*n_jnts+k) = tau_ubg(k);
+        }
+    }
+    casadi::DM args_x0_cas; //to keep converted quantities from eigen to casadi
+    casadi::DM p_cas;
+    casadi::DM lbx_cas = toCasadi(lbx);
+    casadi::DM ubx_cas = toCasadi(ubx);
+    casadi::DM lbg_cas = toCasadi(lbg);
+    casadi::DM ubg_cas = toCasadi(ubg);
+    
+    std::vector<casadi::DM> arg;
+    std::vector<casadi::DM> res;
+    std::chrono::duration<double> elapsed_seconds; 
+    casadi::DM sol_cas; //to keep solution from the solver
+    // convert solution for casadi to eigen
+    // Eigen::Matrix<double, (MPC_HORIZON+1)*n_states+MPC_HORIZON*n_controls, 1> sol_eig(sol_vec.data());
+    Eigen::MatrixXd sol_ct_all(MPC_HORIZON*n_controls,1);
+    // Eigen::Map<Eigen::MatrixXd> sol_ct_temp(sol_ct_all.data(), n_controls, MPC_HORIZON); 
+    Eigen::MatrixXd sol_ct_colWise;
+    Eigen::Matrix<double, 1, n_controls> sol_ct_first;
+    Eigen::Matrix<double, 1, n_controls> sol_ct_last;
+    //should account for MPC_HORIZON=1
+    // if (MPC_HORIZON > 1)
+        Eigen::Matrix<double, (MPC_HORIZON-1), n_controls> sol_ct_rest;
+    // else 
+    //     Eigen::MatrixXd sol_ct_rest = Eigen;
+    t_mpc[mpciter+1] = t0;
+    casadi::DM sol_ct_first_cas;
+    casadi::DM x0_cas;
+    casadi::DM Co_cas;
+    casadi::DM No_cas;
+    std::vector<casadi::DM> argF;
+    std::vector<casadi::DM> f_value; //call the dynamic fucntion
+    casadi::DM rhs_cas;
+    Eigen::VectorXd tau_iter = Eigen::VectorXd::Zero(n_jnts);
+    Eigen::Matrix<double,100,n_jnts> tau_log = Eigen::Matrix<double,100,n_jnts>::Zero();
+    KDL::Frame ee_F_obj = robot.getEEFrame().Inverse()*obj.getFrame();
+    Eigen::Matrix3d R_wb_current, R_we;
+    Eigen::Matrix3d R_eb = Eigen::Matrix3d::Identity(); //for now asssuming no rotation bw ee and body
+    std::cout<<"##############KDL############"<<ee_F_obj<<"\n";
+    Eigen::Matrix4d T_wb_current = Eigen::Matrix4d::Zero();
+    Eigen::Matrix4d T_eb = Eigen::Matrix4d::Zero();
+    fromKDLToEigen(ee_F_obj, T_eb);
+    std::cout<<"##############Eigen############"<<T_eb<<"\n";
+    // for (int i = 0; i < 3; ++i)
+    // {
+    //     for (int j = 0; j < 3; ++j)
+    //         T_eb(i,j) = R_eb(i,j);
+    // }
+    // T_eb(2,3) = 0.3; T_eb(3,3) = 1; //to be checked
+    // Eigen::Matrix4d T_we_current = Eigen::Matrix4d::Zero();
+    // KDL::Frame T_we_kdl;
+    // KDL::JntArray q_prev, q_new, dq_prev;// dq_new;
+    // Eigen::VectorXd dq_new = Eigen::VectorXd::Zero(n_jnts);
+    // q_prev = fromVecToKDL(jnt_pos); q_new = q_prev;
+    // dq_prev = fromVecToKDL(jnt_vel);
+    KDL::Twist obj_t;
+    Eigen::VectorXd obj_t_Eigen = Eigen::VectorXd::Zero(6);
+    double t_tau_now = 0, t_tau_prev = 0; //time keeping for tau calculation
+    double t_sh_now = 0, t_sh_prev = 0; //time keeping for shift function
+    //***************modified [mpc parameters]*******************
     //momentumEstimator est(5.0, robot.getNrJnts());
 
     // Create controller
@@ -301,7 +636,22 @@ int main(int argc, char **argv)
 
             // Update time
             t = (ros::Time::now()-begin).toSec();
-
+            //modified [mpc parameters]
+            obj_t = obj.getBodyVelocity();
+            obj_t_Eigen << toEigen((obj_t.vel)), toEigen((obj_t.rot)); 
+            pVEC_ref.clear(); //empty the std vector to push back again
+            // xx.clear();
+            Jb = robot.getObjBodyJac().data;
+            Jb_t = Jb.transpose();
+            iJb = weightedPseudoInverse(Eigen::Matrix<double,7,7>::Identity(),Jb);
+            diJb = Eigen::Matrix<double,7,6>::Zero();
+            M_ = combinedM(robot.getJsim(),obj.getMassMatrix(),iJb);//,iJb,M_m);
+            Co = obj.getCoriolisMatrix();
+            // std::cout<<"Co: "<<Co<<"\n";
+            No = obj.getGravity();
+            // C_ = combinedC(robot.getJsim(),robot.getCoriolis(),Co,iJb,diJb);
+            N_ = combinedN(robot.getGravity(),No,iJb);
+            //modified [mpc parameters]
             // Extract desired pose
             KDL::Frame des_pose = KDL::Frame::Identity();
             KDL::Twist des_cart_vel = KDL::Twist::Zero(), des_cart_acc = KDL::Twist::Zero();
@@ -312,6 +662,143 @@ int main(int argc, char **argv)
             else if(t > init_time_slot && t <= traj_duration + init_time_slot)
             {
                 p = planner.compute_trajectory(t-init_time_slot);
+                //modified [mpc parameters]
+                for (int i = 0; i < MPC_HORIZON; ++i){
+                    p_future[i] = planner.compute_trajectory(t+i*epsilon_t-init_time_slot);
+                    // std::cout<<"p_future: "<<p_future[i].pos<<" "<<p_future[i].vel<<"\n";
+                }
+                    
+                oZYX << x0[4], x0[5], x0[6];
+                pVEC_ref = ref(oZYX, p_future);
+                pVEC_ref_ = Eigen::Map<Eigen::VectorXd>(pVEC_ref.data(), pVEC_ref.size());
+                // Eigen matrices are stored in column major order by default
+                pVEC << (Eigen::Map<Eigen::VectorXd>(M_.data(), M_.cols()*M_.rows())), 
+                        (Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())),
+                        N_,(Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())),
+                        No,(Eigen::Map<Eigen::VectorXd>(Jb_t.data(), Jb_t.cols()*Jb_t.rows())),
+                        x0,pVEC_ref_;
+                // std::cout<<"pVEC updated "<<pVEC<<std::endl;
+                for (int i = 0; i < MPC_HORIZON+1; ++i)
+                {
+                    for (int j = 0; j < n_states; ++j)
+                        args_x0(i*n_states+j) = X0(i,j);
+                }
+                for (int i = 0; i < MPC_HORIZON; ++i)
+                {
+                    for (int j = 0; j < n_controls; ++j)
+                        args_x0(n_states*(MPC_HORIZON+1)+i*n_controls+j) = u0(i,j); 
+                }
+                args_x0_cas = toCasadi(args_x0); //this is extended x
+                p_cas = toCasadi(pVEC);
+                arg = {args_x0_cas,p_cas,lbx_cas,ubx_cas,lbg_cas,ubg_cas,0,0};
+                auto start = std::chrono::steady_clock::now();
+                res = solv(arg); //call the solver
+                auto end = std::chrono::steady_clock::now();
+                elapsed_seconds = end-start; 
+                std::cout << "elapsed time: " << elapsed_seconds.count() << "s\n";
+                std::cout << "Objective at solution = " << res.at(1) << std::endl;
+                sol_cas = res.at(0); //solution from the solver
+                // convert solution for casadi to eigen
+                auto sol_vec = static_cast<std::vector<double>>(sol_cas);
+                Eigen::Matrix<double, (MPC_HORIZON+1)*n_states+MPC_HORIZON*n_controls, 1> sol_eig(sol_vec.data());
+                std::cout<<"sol entire: "<<sol_eig<<std::endl;
+                sol_ct_all << sol_eig.block((MPC_HORIZON+1)*n_states,0,MPC_HORIZON*n_controls,1);
+                Eigen::Map<Eigen::MatrixXd> sol_ct_temp(sol_ct_all.data(), n_controls, MPC_HORIZON); 
+                sol_ct_colWise = sol_ct_temp.transpose();
+                sol_ct_first = sol_ct_colWise.block(0,0,1,n_controls);//(1,Eigen::all);
+                sol_ct_last = sol_ct_colWise.block(MPC_HORIZON-1, 0, 1, n_controls);
+                //should account for MPC_HORIZON=1
+                // if (MPC_HORIZON > 1)
+                sol_ct_rest = sol_ct_colWise.block(1, 0, (MPC_HORIZON-1), n_controls);
+                // else 
+                //     Eigen::MatrixXd sol_ct_rest = Eigen;
+                t_mpc[mpciter+1] = t0;
+                sol_ct_first_cas = toCasadi(sol_ct_first);
+                x0_cas = toCasadi(x0);
+                Co_cas = toCasadi((Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())));
+                No_cas = toCasadi(No);
+                std::cout<<"sol first: "<<sol_ct_first<<std::endl;
+                std::cout<<"Co: "<<Co<<std::endl;
+                argF = {x0_cas,sol_ct_first_cas,Co_cas,No_cas};
+                f_value = fDYN(argF); //call the dynamic fucntion
+                rhs_cas = f_value.at(0);
+                // convert from casadi to eigen
+                auto rhs_vec = static_cast<std::vector<double>>(rhs_cas);
+                Eigen::Matrix<double, n_states, 1> rhs_eig(rhs_vec.data());
+                std::cout<<"rhs: "<<rhs_eig<<std::endl;
+                // std::cout<<"u0 before shift"<<u0<<std::endl;
+                t_sh_now = (ros::Time::now()-begin).toSec();
+                shift((t_sh_now-t_sh_prev), t0, x0, u0, sol_ct_first, sol_ct_rest, sol_ct_last, rhs_eig);
+                t_sh_prev = t_sh_now;
+                std::cout<<"x0 after shift"<<x0<<std::endl;
+                std::cout<<"u0 after shift"<<u0<<std::endl; 
+                for (int i = 0; i < n_states; ++i)
+                    xx.push_back(x0[i]);
+                xx_out.row(mpciter+1) << x0.transpose();
+                // std::cout<<"xx final"<<xx<<std::endl;
+                Eigen::Map<Eigen::MatrixXd> X0_temp(sol_eig.block(0,0,(MPC_HORIZON+1)*n_states,1).data(), n_states, MPC_HORIZON+1);
+                X0 = X0_temp.transpose();
+                // shift trajectory to initialize the next step
+                X0 << X0.block(1,0,MPC_HORIZON,n_states), X0.block(MPC_HORIZON-1,0,1,n_states);
+                std::cout<<"mpciter: "<<mpciter<<"\n";
+                mpciter += 1;
+                // std::cout<<"xx_out: "<<xx_out<<"\n";
+
+                //compute torque using IK
+                // oZYX << x0[4], x0[5], x0[6];
+                // R_wb_current = zyx2R(oZYX);
+                // for (int i = 0; i < 3; ++i)
+                // {
+                //     for (int j = 0; j < 3; ++j)
+                //         T_wb_current(i,j) = R_wb_current(i,j); 
+                // }
+                // T_wb_current(0,3) = x0[0]; T_wb_current(1,3) = x0[1]; T_wb_current(2,3) = x0[2];
+                // T_wb_current(3,3) = 1;
+                // T_we_current = T_wb_current*T_eb.inverse();
+                // R_we = R_wb_current*R_eb.inverse();
+                // // tf::transformEigenToKDL(T_wb_current, T_we_kdl);
+                // fromEigenToKDL(T_we_current, T_we_kdl); 
+                // ikSol_->CartToJnt(q_prev,T_we_kdl,q_new);
+                // q_new = LWR.ikcon(T_we_current,q_prev');
+                // q_current_op = q_new'; 
+                // q_log = [q_log q_current_op];
+                // %     dq_current = (q_current-q_prev)/h;
+                // robot.update(fromKDLToVec(q_new),fromKDLToVec(dq_prev));
+                // // Je_current = LWR.jacob0(q_current_op');
+                // // %Je_current = computeJe(d3,d5,d7,q_current_op);
+                // // R_we = R_wb_current*R_eb'; %rotation of ee frame wrt world frame
+                // Jb = robot.getObjBodyJac().data;
+                // iJb = weightedPseudoInverse(Eigen::Matrix<double,7,7>::Identity(),Jb);
+                // // Jb = Ad_eb\(blkdiag(R_we',R_we')*Je_current);
+                // // iJb = pinv(Jb); diJb = zeros(7,6);
+                // dq_new = iJb*x0.block(6,0,6,1);
+                // // dq_current_op = pinv(Jb)*x0(7:12);
+                // // dq_log = [dq_log dq_current_op]; %vel output of MPC is already in B frame
+                // // //IK part finishes
+                // M_ = combinedM(robot.getJsim(),obj.getMassMatrix(),iJb);//,iJb,M_m);
+                // Co = obj.getCoriolisMatrix();
+                // No = obj.getGravity();
+                // // C_ = combinedC(robot.getJsim(),robot.getCoriolis(),Co,iJb,diJb);
+                // N_ = combinedN(robot.getGravity(),No,iJb);
+                x_prev = xx_out.row(mpciter).transpose();
+                // tau_mpc = Jb.transpose()*(M_*(x0.block(6,0,6,1) - x_prev.block(6,0,6,1))/h + C_*x0.block(6,0,6,1) + N_);
+                t_tau_now = (ros::Time::now()-begin).toSec();
+                tau_mpc = Jb_t*(M_*(x0.block(6,0,6,1) - obj_t_Eigen)/(t_tau_now-t_tau_prev) + C_*x0.block(6,0,6,1) + N_);
+                t_tau_prev = t_tau_now;
+                std::cout<<"tau mpc: "<<tau_mpc<<"\n";
+                std::cout<<"Jbt: "<<Jb_t<<"\n";
+                std::cout<<"M_: "<<M_<<"\n";
+                std::cout<<"ddx: "<<(x0.block(6,0,6,1) - obj_t_Eigen)/h<<"\n";
+                std::cout<<"dx: "<<x0.block(6,0,6,1)<<"\n";
+                std::cout<<"iJb: "<<iJb<<"\n";
+                std::cout<<"N robot: "<<robot.getGravity()<<"\n";
+                std::cout<<"N obj: "<<No<<"\n"; 
+                std::cout<<"N_: "<<N_<<"\n";
+                return 0;
+                // std::cout<<"X0 final"<<X0<<std::endl;
+                // q_prev.data = q_new.data;
+                // dq_prev = fromEigenToKDL(dq_new);
+                //modified [mpc parameters]
 //                double x = p.pos.x()+ 0.1*sin(2*t);
 //                p.pos.x() = x;
                 des_cart_vel = KDL::Twist(KDL::Vector(p.vel[0], p.vel[1], p.vel[2]),KDL::Vector::Zero());
@@ -325,7 +812,8 @@ int main(int argc, char **argv)
             des_pose.p = KDL::Vector(p.pos[0],p.pos[1],p.pos[2]);
 
 #if USE_SHARED_CNTR
-            tau = controller_.sharedCntr(des_pose, des_cart_vel, des_cart_acc, Kp, Kd);
+            // tau = controller_.sharedCntr(des_pose, des_cart_vel, des_cart_acc, Kp, Kd);
+            tau = tau_mpc;
 #endif //USE_SHARED_CNTR
 
 #if USE_JNT_ID

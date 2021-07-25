@@ -100,11 +100,11 @@ KDLObject::KDLObject(double &m, Eigen::Matrix3d &I, std::vector<KDL::Frame> &c, 
     for (unsigned int i = 0; i < c.size(); i++)
         addContact(c.at(i));
 
-    std::cout << "Object created " << std::endl;
-    std::cout << "Grasp matrix: " << std::endl;
-    std::cout << G_ << std::endl;
-    std::cout << "Friction cone matrix: " << std::endl;
-    std::cout << getContacts().at(0).getConeVersors() << std::endl;
+    // std::cout << "Object created " << std::endl;
+    // std::cout << "Grasp matrix: " << std::endl;
+    // std::cout << G_ << std::endl;
+    // std::cout << "Friction cone matrix: " << std::endl;
+    // std::cout << getContacts().at(0).getConeVersors() << std::endl;
 }
 
 void KDLObject::computeContactForces(KDL::Wrench &F_b)
@@ -242,17 +242,17 @@ void KDLObject::computeContactForces(KDL::Wrench &F_b)
     //printf("%s\n", x.tostring(2).c_str()); // EXPECTED: [2,2]
 
     Eigen::VectorXd x_eigen = toEigen(x);
-    std::cout << "tilde Fb: " << x_eigen.block(0,0,6,1).transpose() << std::endl;
+    // std::cout << "tilde Fb: " << x_eigen.block(0,0,6,1).transpose() << std::endl;
     Eigen::Matrix<double,6,1> F = -(x_eigen.block(0,0,6,1) - toEigen(F_b));
-    std::cout << "Fb star: " << toEigen(F_b).transpose() << std::endl;
-    std::cout << "Fb: " << F.transpose() << std::endl;
+    // std::cout << "Fb star: " << toEigen(F_b).transpose() << std::endl;
+    // std::cout << "Fb: " << F.transpose() << std::endl;
     F_b = toKDLWrench(F);
     Eigen::Matrix<double,12,1> Fc = x_eigen.block(6,0,12,1);
-    std::cout << "Fc:" << std::endl;
-    std::cout << Fc.transpose() << std::endl;
-    std::cout << "Fb: " << G_*Fc << std::endl;
+    // std::cout << "Fc:" << std::endl;
+    // std::cout << Fc.transpose() << std::endl;
+    // std::cout << "Fb: " << G_*Fc << std::endl;
     Eigen::Matrix<double,16,1> lambda = x_eigen.block(18,0,16,1);
-    std::cout << "lambda:" << std::endl;
+    // std::cout << "lambda:" << std::endl;
     std::cout << lambda.transpose() << std::endl;
 
     std::vector<KDL::Wrench> c_w;
@@ -343,10 +343,35 @@ void KDLObject::computeC()
     C_ << omega.cross(mass_*v), omega.cross(I_*omega);
 }
 
+Eigen::Matrix<double, 6, 6> KDLObject::getCoriolisMatrix() const
+{
+    Eigen::Matrix<double, 3, 3> obj_I = getInertia();
+    KDL::Twist obj_t = getBodyVelocity();
+    Eigen::Vector3d obj_v = toEigen((obj_t.vel));
+    Eigen::Vector3d obj_omega = toEigen((obj_t.rot));
+
+    Eigen::Matrix<double,6,6> Co = Eigen::Matrix<double,6,6>::Zero();
+    Co.block(0,0,3,3) = skew(obj_omega)*mass_;
+    Co.block(3,3,3,3) = skew(obj_omega)*obj_I;
+    return Co;
+}
+
 void KDLObject::computeN()
 {
     KDL::Rotation R = getFrame().M.Inverse();
     N_ << mass_*toEigen(R)*g_, 0.0, 0.0, 0.0;
+}
+
+Eigen::VectorXd KDLObject::getGravity() const
+{
+    // double obj_m = getMass();
+    // Eigen::Vector3d g_;
+    // g_ << 0.0, 0.0, -9.81;
+    Eigen::VectorXd No(6);
+    // No << obj_m*toEigen(obj.getFrame().M.Inverse())*g_, 0.0, 0.0, 0.0;
+    KDL::Rotation R = getFrame().M.Inverse();
+    No << mass_*toEigen(R)*g_, 0.0, 0.0, 0.0;
+    return No;
 }
 
 KDL::Twist KDLObject::computeFD(const KDL::Wrench &Fb) const

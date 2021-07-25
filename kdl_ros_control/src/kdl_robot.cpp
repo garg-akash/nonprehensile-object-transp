@@ -43,6 +43,8 @@ KDLRobot::KDLRobot(KDL::Tree &robot_tree)
     q_max_.data.resize(n_);
     q_min_.data << -2.96,-2.09,-2.96,-2.09,-2.96,-2.09,-2.96; //-2*M_PI,-2*M_PI;//
     q_max_.data <<  2.96,2.09,2.96,2.09,2.96,2.09,2.96; //2*M_PI, 2*M_PI;
+    ikVelSol_ = new KDL::ChainIkSolverVel_wdls(chain_);
+    ikSol_ = new KDL::ChainIkSolverPos_NR_JL(chain_, q_min_, q_max_, *fkSol_, *ikVelSol_);
 }
 
 void KDLRobot::update(std::vector<double> _jnt_values, std::vector<double> _jnt_vel)

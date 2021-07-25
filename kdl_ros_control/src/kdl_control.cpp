@@ -26,17 +26,17 @@ Eigen::VectorXd KDLController::sharedCntr(KDL::Frame &_desObjPos,
     double cost;
     // e.block(3,0,3,1) = tiltingTorque(cost, 2, 1e-2);
 
-    std::cout << "F_b ID: " << toEigen(F_b).transpose() << std::endl;
+    // std::cout << "F_b ID: " << toEigen(F_b).transpose() << std::endl;
     Eigen::Matrix<double, 6, 1> y = obj_->getMassMatrix()*(spatialRotation(obj_->getFrame().M.Inverse())*toEigen(_desObjAcc) +
                 spatialRotation(obj_->getFrame().M.Inverse())*(Kp*e) +
                 spatialRotation(obj_->getFrame().M.Inverse())*(Kd*edot));
 
     F_b = F_b + toKDLWrench(y);
-    std::cout << "F_b ID + y: " << toEigen(F_b).transpose() << std::endl;
+    // std::cout << "F_b ID + y: " << toEigen(F_b).transpose() << std::endl;
 
     obj_->computeContactForces(F_b);
     KDL::Twist Vbdot = obj_->computeFD(F_b);
-    std::cout << "Vbdot: " << toEigen(Vbdot).transpose() << std::endl;
+    // std::cout << "Vbdot: " << toEigen(Vbdot).transpose() << std::endl;
 
     std::vector<KDL::Wrench> w = obj_->getContactsWrenches();
     for (unsigned int i = 0; i < w.size(); i++)
@@ -55,7 +55,7 @@ Eigen::VectorXd KDLController::sharedCntr(KDL::Frame &_desObjPos,
         - (Eigen::Matrix<double,7,7>::Identity() - weightedPseudoInverse(robot_->getJsim(), Jb.data)*Jb.data)*robot_->getJntVelocities();
     // std::cout << "Jb.data: " << Jb.data << std::endl;
     // std::cout << "u: " << u.transpose() << std::endl;
-       std::cout << "getJntVelocities: " << robot_->getJntVelocities().transpose() << std::endl;
+       // std::cout << "getJntVelocities: " << robot_->getJntVelocities().transpose() << std::endl;
     // compute tau
     std::vector<Eigen::Matrix<double,3,7>> Jci = robot_->getContactsBodyJac();
     Eigen::Matrix<double,12,7> Jc = toEigen(Jci);
@@ -76,7 +76,7 @@ Eigen::VectorXd KDLController::computeFcAngles()
     {
         Eigen::Vector3d z_hat(0,0,1);
         Eigen::Vector3d Fci = toEigen(obj_->getContacts().at(i).getWrench().force);
-        std::cout << "Fci: " << Fci.transpose() << std::endl;
+        // std::cout << "Fci: " << Fci.transpose() << std::endl;
         double normFci = Fci.norm();
         double alpha = std::acos(z_hat.dot(Fci)/normFci);
         Eigen::Vector3d n_hat = Fci.cross(z_hat);

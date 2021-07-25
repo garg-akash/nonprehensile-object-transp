@@ -151,6 +151,7 @@ target_link_libraries(${PROJECT_NAME}-iiwa_node
   orocos-kdl
   kdl_parser
   kdl_ros_control
+  casadi
 )
 
 #############

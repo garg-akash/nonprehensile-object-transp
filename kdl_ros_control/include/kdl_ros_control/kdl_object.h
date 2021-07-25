@@ -73,6 +73,8 @@ public:
     KDL::Wrench computeID();
     KDL::Twist computeFD(const KDL::Wrench &Fb) const;
 
+    Eigen::Matrix<double, 6, 6> getCoriolisMatrix() const;
+    Eigen::VectorXd getGravity() const;
 
 private:
 
