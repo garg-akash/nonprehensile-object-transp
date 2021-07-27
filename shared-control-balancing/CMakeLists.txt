@@ -10,6 +10,15 @@ add_compile_options(-std=c++11)
 find_package(catkin REQUIRED COMPONENTS roscpp rospy std_msgs genmsg eigen_conversions kdl_ros_control)
 find_package(Eigen3 REQUIRED)
 
+set (nlpN3_PATH "\"${PROJECT_SOURCE_DIR}\"")
+
+configure_file (
+  "${PROJECT_SOURCE_DIR}/config.h.in"
+  "${PROJECT_BINARY_DIR}/config.h"
+ )
+include_directories("${PROJECT_BINARY_DIR}")
+
+
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
 

@@ -23,6 +23,7 @@
 #include <math.h>
 #include <chrono>
 #include <eigen_conversions/eigen_kdl.h>
+#include "config.h"
 
 #define USE_SHARED_CNTR 1
 #define USE_JNT_ID 1
@@ -102,7 +103,7 @@ Eigen::Matrix3d zyx2E(const Eigen::VectorXd &v){ //coeff matrix to convert deriv
          1, sin(v[2])*sin(v[1])/cos(v[1]), cos(v[2])*sin(v[1])/cos(v[1]);
     return E;
 }
-std::vector<double> ref(const Eigen::VectorXd &oZYX, const std::vector<trajectory_point> &p_future)
+std::vector<double> ref(const Eigen::VectorXd &oZYX, const std::vector<trajectory_point> &p_future, const Eigen::MatrixXd &lam_ref)
 {
     std::vector<double> pVEC_ref;
     Eigen::Matrix3d R = zyx2R(oZYX);
@@ -112,19 +113,19 @@ std::vector<double> ref(const Eigen::VectorXd &oZYX, const std::vector<trajector
         for (int j = 0; j < p_future[i].pos.size(); j++)
             pVEC_ref.push_back(p_future[i].pos[j]);
 
-        pVEC_ref.push_back(0);
+        pVEC_ref.push_back(0); //assume for now orientation is 0
         pVEC_ref.push_back(0);
         pVEC_ref.push_back(0);
 
-        vel_b = R.transpose()*p_future[i].vel;
+        vel_b = R.transpose()*p_future[i].vel; //lin vel in body frame
         for (int j = 0; j < p_future[i].vel.size(); j++)
             pVEC_ref.push_back(vel_b[j]);
-        pVEC_ref.push_back(0);
+        pVEC_ref.push_back(0); //assume for now ang vel is 0
         pVEC_ref.push_back(0);
         pVEC_ref.push_back(0);
         pVEC_ref.push_back(9.8);
         for (int j = 0; j < 16; j++)
-            pVEC_ref.push_back(0);
+            pVEC_ref.push_back(lam_ref(i,j));
         for (int j = 0; j < n_controls; ++j)
             pVEC_ref.push_back(0);
     }
@@ -267,8 +268,9 @@ int main(int argc, char **argv)
     t_mpc.push_back(t0);
     float epsilon_t = 1e-3;
     //include solver
-    std::string path = "/home/akash/Documents/waiter-robot-mpc/Software/matlab/extraFiles/";
-    casadi::Function solv = casadi::nlpsol("solv", "ipopt", path + "nlpN3.so"); //loading solver
+    std::string path = std::string(nlpN3_PATH);
+    std::cout << "Library to load: " << path + "/nlpN3.so\n";
+    casadi::Function solv = casadi::nlpsol("solv", "ipopt", path + "/nlpN3.so"); //loading solver
     casadi::Function fDYN = casadi::external("f"); //loading the dynamics fucntion
     //modified [mpc parameters]
     // Subscribers
@@ -546,10 +548,7 @@ int main(int argc, char **argv)
     std::vector<casadi::DM> res;
     std::chrono::duration<double> elapsed_seconds; 
     casadi::DM sol_cas; //to keep solution from the solver
-    // convert solution for casadi to eigen
-    // Eigen::Matrix<double, (MPC_HORIZON+1)*n_states+MPC_HORIZON*n_controls, 1> sol_eig(sol_vec.data());
     Eigen::MatrixXd sol_ct_all(MPC_HORIZON*n_controls,1);
-    // Eigen::Map<Eigen::MatrixXd> sol_ct_temp(sol_ct_all.data(), n_controls, MPC_HORIZON); 
     Eigen::MatrixXd sol_ct_colWise;
     Eigen::Matrix<double, 1, n_controls> sol_ct_first;
     Eigen::Matrix<double, 1, n_controls> sol_ct_last;
@@ -571,27 +570,26 @@ int main(int argc, char **argv)
     KDL::Frame ee_F_obj = robot.getEEFrame().Inverse()*obj.getFrame();
     Eigen::Matrix3d R_wb_current, R_we;
     Eigen::Matrix3d R_eb = Eigen::Matrix3d::Identity(); //for now asssuming no rotation bw ee and body
-    std::cout<<"##############KDL############"<<ee_F_obj<<"\n";
     Eigen::Matrix4d T_wb_current = Eigen::Matrix4d::Zero();
     Eigen::Matrix4d T_eb = Eigen::Matrix4d::Zero();
     fromKDLToEigen(ee_F_obj, T_eb);
-    std::cout<<"##############Eigen############"<<T_eb<<"\n";
-    // for (int i = 0; i < 3; ++i)
-    // {
-    //     for (int j = 0; j < 3; ++j)
-    //         T_eb(i,j) = R_eb(i,j);
-    // }
-    // T_eb(2,3) = 0.3; T_eb(3,3) = 1; //to be checked
-    // Eigen::Matrix4d T_we_current = Eigen::Matrix4d::Zero();
-    // KDL::Frame T_we_kdl;
-    // KDL::JntArray q_prev, q_new, dq_prev;// dq_new;
-    // Eigen::VectorXd dq_new = Eigen::VectorXd::Zero(n_jnts);
-    // q_prev = fromVecToKDL(jnt_pos); q_new = q_prev;
-    // dq_prev = fromVecToKDL(jnt_vel);
     KDL::Twist obj_t;
     Eigen::VectorXd obj_t_Eigen = Eigen::VectorXd::Zero(6);
     double t_tau_now = 0, t_tau_prev = 0; //time keeping for tau calculation
     double t_sh_now = 0, t_sh_prev = 0; //time keeping for shift function
+    std::vector<Contact> obj_contacts = obj.getContacts();
+    Eigen::Matrix<double, 6, 12> G = obj.getGraspMatrix();
+    Eigen::Matrix<double, 3, 4> Fc_hat_ = obj_contacts.at(0).getConeVersors();
+    Eigen::Matrix<double,12,16> Fc_hat;
+    Fc_hat.block(0,0,3,4) = Fc_hat_;
+    Fc_hat.block(3,4,3,4) = Fc_hat_;
+    Fc_hat.block(6,8,3,4) = Fc_hat_;
+    Fc_hat.block(9,12,3,4) = Fc_hat_;
+    Eigen::Matrix<double, 6, 1> Fb_star = Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 1> vel_ref = Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 1> acc_ref = Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, MPC_HORIZON, n_jnts> tau_ref = Eigen::Matrix<double, MPC_HORIZON, n_jnts>::Zero();  
+    Eigen::Matrix<double, MPC_HORIZON, 16> lam_ref = Eigen::Matrix<double, MPC_HORIZON, 16>::Zero();
     //***************modified [mpc parameters]*******************
     //momentumEstimator est(5.0, robot.getNrJnts());
 
@@ -647,10 +645,9 @@ int main(int argc, char **argv)
             diJb = Eigen::Matrix<double,7,6>::Zero();
             M_ = combinedM(robot.getJsim(),obj.getMassMatrix(),iJb);//,iJb,M_m);
             Co = obj.getCoriolisMatrix();
-            // std::cout<<"Co: "<<Co<<"\n";
-            No = obj.getGravity();
+            No = -obj.getGravity();
             // C_ = combinedC(robot.getJsim(),robot.getCoriolis(),Co,iJb,diJb);
-            N_ = combinedN(robot.getGravity(),No,iJb);
+            N_ = combinedN(-robot.getGravity(),No,iJb);
             //modified [mpc parameters]
             // Extract desired pose
             KDL::Frame des_pose = KDL::Frame::Identity();
@@ -666,10 +663,18 @@ int main(int argc, char **argv)
                 for (int i = 0; i < MPC_HORIZON; ++i){
                     p_future[i] = planner.compute_trajectory(t+i*epsilon_t-init_time_slot);
                     // std::cout<<"p_future: "<<p_future[i].pos<<" "<<p_future[i].vel<<"\n";
+                    Eigen::Matrix<double, 6, 1> vel_ref = Eigen::Matrix<double, 6, 1>::Zero();
+                    Eigen::Matrix<double, 6, 1> acc_ref = Eigen::Matrix<double, 6, 1>::Zero();
+                    vel_ref << p_future[i].vel[0], p_future[i].vel[1], p_future[i].vel[2], 0, 0, 0;
+                    acc_ref << p_future[i].acc[0], p_future[i].acc[1], p_future[i].acc[2], 0, 0, 0; 
+                    tau_ref.block(i,0, 1, 7) = (Jb_t*(M_*acc_ref + C_*vel_ref + N_)).transpose(); //not exactly accurate ref as state of robot + obj is not updated  
+                    Fb_star = obj.getMassMatrix()*acc_ref + Co*vel_ref + No;
+                    lam_ref.block(i, 0, 1, 16) = (weightedPseudoInverse(Eigen::Matrix<double,16,16>::Identity(),G*Fc_hat)*Fb_star).transpose();
                 }
-                    
+                std::cout<<"tau_ref: "<<tau_ref<<std::endl; 
+                std::cout<<"lam_ref: "<<lam_ref<<std::endl;        
                 oZYX << x0[4], x0[5], x0[6];
-                pVEC_ref = ref(oZYX, p_future);
+                pVEC_ref = ref(oZYX, p_future, lam_ref);
                 pVEC_ref_ = Eigen::Map<Eigen::VectorXd>(pVEC_ref.data(), pVEC_ref.size());
                 // Eigen matrices are stored in column major order by default
                 pVEC << (Eigen::Map<Eigen::VectorXd>(M_.data(), M_.cols()*M_.rows())), 
@@ -701,7 +706,7 @@ int main(int argc, char **argv)
                 // convert solution for casadi to eigen
                 auto sol_vec = static_cast<std::vector<double>>(sol_cas);
                 Eigen::Matrix<double, (MPC_HORIZON+1)*n_states+MPC_HORIZON*n_controls, 1> sol_eig(sol_vec.data());
-                std::cout<<"sol entire: "<<sol_eig<<std::endl;
+                // std::cout<<"sol entire: "<<sol_eig<<std::endl;
                 sol_ct_all << sol_eig.block((MPC_HORIZON+1)*n_states,0,MPC_HORIZON*n_controls,1);
                 Eigen::Map<Eigen::MatrixXd> sol_ct_temp(sol_ct_all.data(), n_controls, MPC_HORIZON); 
                 sol_ct_colWise = sol_ct_temp.transpose();
@@ -718,20 +723,19 @@ int main(int argc, char **argv)
                 Co_cas = toCasadi((Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())));
                 No_cas = toCasadi(No);
                 std::cout<<"sol first: "<<sol_ct_first<<std::endl;
-                std::cout<<"Co: "<<Co<<std::endl;
                 argF = {x0_cas,sol_ct_first_cas,Co_cas,No_cas};
                 f_value = fDYN(argF); //call the dynamic fucntion
                 rhs_cas = f_value.at(0);
                 // convert from casadi to eigen
                 auto rhs_vec = static_cast<std::vector<double>>(rhs_cas);
                 Eigen::Matrix<double, n_states, 1> rhs_eig(rhs_vec.data());
-                std::cout<<"rhs: "<<rhs_eig<<std::endl;
+                // std::cout<<"rhs: "<<rhs_eig<<std::endl;
                 // std::cout<<"u0 before shift"<<u0<<std::endl;
                 t_sh_now = (ros::Time::now()-begin).toSec();
                 shift((t_sh_now-t_sh_prev), t0, x0, u0, sol_ct_first, sol_ct_rest, sol_ct_last, rhs_eig);
                 t_sh_prev = t_sh_now;
-                std::cout<<"x0 after shift"<<x0<<std::endl;
-                std::cout<<"u0 after shift"<<u0<<std::endl; 
+                // std::cout<<"x0 after shift"<<x0<<std::endl;
+                // std::cout<<"u0 after shift"<<u0<<std::endl; 
                 for (int i = 0; i < n_states; ++i)
                     xx.push_back(x0[i]);
                 xx_out.row(mpciter+1) << x0.transpose();
@@ -788,16 +792,11 @@ int main(int argc, char **argv)
                 std::cout<<"tau mpc: "<<tau_mpc<<"\n";
                 std::cout<<"Jbt: "<<Jb_t<<"\n";
                 std::cout<<"M_: "<<M_<<"\n";
+                std::cout<<"C_: "<<C_<<"\n";
+                std::cout<<"N_: "<<N_<<"\n";
                 std::cout<<"ddx: "<<(x0.block(6,0,6,1) - obj_t_Eigen)/h<<"\n";
                 std::cout<<"dx: "<<x0.block(6,0,6,1)<<"\n";
-                std::cout<<"iJb: "<<iJb<<"\n";
-                std::cout<<"N robot: "<<robot.getGravity()<<"\n";
-                std::cout<<"N obj: "<<No<<"\n"; 
-                std::cout<<"N_: "<<N_<<"\n";
                 return 0;
-                // std::cout<<"X0 final"<<X0<<std::endl;
-                // q_prev.data = q_new.data;
-                // dq_prev = fromEigenToKDL(dq_new);
                 //modified [mpc parameters]
 //                double x = p.pos.x()+ 0.1*sin(2*t);
 //                p.pos.x() = x;
