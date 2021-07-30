@@ -24,6 +24,9 @@
 #include <chrono>
 #include <eigen_conversions/eigen_kdl.h>
 #include "config.h"
+#include "std_msgs/Float64MultiArray.h"
+#include <shared_control_msgs/GetTorques.h>
+
 
 #define USE_SHARED_CNTR 1
 #define USE_JNT_ID 1
@@ -34,6 +37,9 @@
 std::vector<double> jnt_pos(7,0.0), jnt_vel(7,0.0), obj_pos(6,0.0),  obj_vel(6,0.0);
 bool robot_state_available = false, obj_state_available = false;
 double obj_mass;
+std_msgs::Float64MultiArray tau_msg;
+
+bool sim_ready = false;
 Eigen::Matrix3d obj_inertia = Eigen::Matrix3d::Identity();
 const int n_states = 29;
 const int n_controls = 16;
@@ -239,6 +245,8 @@ void objectStateCallback(const gazebo_msgs::LinkStates & msg)
 
 void jointStateCallback(const sensor_msgs::JointState & msg)
 {
+    std::cout << "JOINTSTATES" << std::endl;
+
     robot_state_available = true;
     jnt_pos.clear();
     jnt_vel.clear();
@@ -247,6 +255,24 @@ void jointStateCallback(const sensor_msgs::JointState & msg)
         jnt_pos.push_back(msg.position[i]);
         jnt_vel.push_back(msg.velocity[i]);
     }
+    sim_ready = true;
+}
+
+
+bool gettorques(shared_control_msgs::GetTorques::Request &req,
+                shared_control_msgs::GetTorques::Response &res)
+{
+    //res.b = 60.75;
+    res.tj0 = tau_msg.data[0];
+    res.tj1 = tau_msg.data[1];
+    res.tj2 = tau_msg.data[2];
+    res.tj3 = tau_msg.data[3];
+    res.tj4 = tau_msg.data[4];
+    res.tj5 = tau_msg.data[5];
+    res.tj6 = tau_msg.data[6];
+
+    ROS_INFO("sent back the torque");
+    return true;
 }
 
 // Main
@@ -274,17 +300,21 @@ int main(int argc, char **argv)
     casadi::Function fDYN = casadi::external("f"); //loading the dynamics fucntion
     //modified [mpc parameters]
     // Subscribers
-    ros::Subscriber joint_state_sub = n.subscribe("/lbr_iiwa/joint_states", 1, jointStateCallback);
+    ros::Subscriber joint_state_sub = n.subscribe("/lbr_iiwa/joint_states", 0, jointStateCallback);
     ros::Subscriber object_state_sub = n.subscribe("/gazebo/link_states", 1, objectStateCallback);
+    ros::ServiceServer service = n.advertiseService("get_torques", gettorques);
 
     // Publishers
-    ros::Publisher joint1_effort_pub = n.advertise<std_msgs::Float64>("/lbr_iiwa/lbr_iiwa_joint_1_effort_controller/command", 1);
+    // ros::Publisher joint1_effort_pub = n.advertise<std_msgs::Float64>("/lbr_iiwa/lbr_iiwa_joint_1_effort_controller/command", 1);
     ros::Publisher joint2_effort_pub = n.advertise<std_msgs::Float64>("/lbr_iiwa/lbr_iiwa_joint_2_effort_controller/command", 1);
     ros::Publisher joint3_effort_pub = n.advertise<std_msgs::Float64>("/lbr_iiwa/lbr_iiwa_joint_3_effort_controller/command", 1);
     ros::Publisher joint4_effort_pub = n.advertise<std_msgs::Float64>("/lbr_iiwa/lbr_iiwa_joint_4_effort_controller/command", 1);
     ros::Publisher joint5_effort_pub = n.advertise<std_msgs::Float64>("/lbr_iiwa/lbr_iiwa_joint_5_effort_controller/command", 1);
     ros::Publisher joint6_effort_pub = n.advertise<std_msgs::Float64>("/lbr_iiwa/lbr_iiwa_joint_6_effort_controller/command", 1);
     ros::Publisher joint7_effort_pub = n.advertise<std_msgs::Float64>("/lbr_iiwa/lbr_iiwa_joint_7_effort_controller/command", 1);
+    //
+    ros::Publisher joint_tor_pub = n.advertise<std_msgs::Float64MultiArray>("/torque_joints", 1);
+    //
     ros::ServiceClient obj_set_state_srv = n.serviceClient<gazebo_msgs::SetLinkState>("/gazebo/set_link_state");
     ros::ServiceClient des_pose_set_state_srv = n.serviceClient<gazebo_msgs::SetLinkState>("/gazebo/set_link_state");
     ros::ServiceClient obj_get_dyn_srv = n.serviceClient<gazebo_msgs::GetLinkProperties>("/gazebo/get_link_properties");
@@ -294,8 +324,8 @@ int main(int argc, char **argv)
     ros::ServiceClient unpauseGazebo = n.serviceClient<std_srvs::Empty>("/gazebo/unpause_physics");
 
     // Messages
-    std_msgs::Float64 tau1_msg, tau2_msg, tau3_msg, tau4_msg, tau5_msg, tau6_msg, tau7_msg;
-
+    //std_msgs::Float64 tau1_msg, tau2_msg, tau3_msg, tau4_msg, tau5_msg, tau6_msg, tau7_msg;
+    tau_msg.data.resize(7);
     // Services
 //    std_srvs::Empty reset_simulation_srv;
 //    if(resetGazeboSimulation.call(reset_simulation_srv))
@@ -392,7 +422,7 @@ int main(int argc, char **argv)
         ROS_INFO_STREAM_ONCE("Please start gazebo simulation.");
         ros::spinOnce();
     }
-    pauseGazebo.call(pauseSrv);
+    //pauseGazebo.call(pauseSrv);
 
     // Create robot
     KDLRobot robot = createRobot(n);
@@ -627,192 +657,204 @@ int main(int argc, char **argv)
     while ((ros::Time::now()-begin).toSec() < 2*traj_duration + init_time_slot)
     {
         //unpauseGazebo.call(pauseSrv);
-        if (robot_state_available)
+        //if (robot_state_available)
+        //{
+
+        while ( !robot_state_available ) {
+            usleep(0.1*1e6);
+            ros::spinOnce();
+        }
+        robot_state_available = false;
+
+        std::cout << "robot_state_available" << std::endl;
+        // Update robot
+        robot.update(jnt_pos, jnt_vel);
+
+        // Update time
+        t = (ros::Time::now()-begin).toSec();
+        //modified [mpc parameters]
+        obj_t = obj.getBodyVelocity();
+        obj_t_Eigen << toEigen((obj_t.vel)), toEigen((obj_t.rot)); 
+        pVEC_ref.clear(); //empty the std vector to push back again
+        // xx.clear();
+        Jb = robot.getObjBodyJac().data;
+        Jb_t = Jb.transpose();
+        iJb = weightedPseudoInverse(Eigen::Matrix<double,7,7>::Identity(),Jb);
+        diJb = Eigen::Matrix<double,7,6>::Zero();
+        M_ = combinedM(robot.getJsim(),obj.getMassMatrix(),iJb);//,iJb,M_m);
+        Co = obj.getCoriolisMatrix();
+        No = -obj.getGravity();
+        // C_ = combinedC(robot.getJsim(),robot.getCoriolis(),Co,iJb,diJb);
+        N_ = combinedN(-robot.getGravity(),No,iJb);
+        std::cout<<"#############M_m#################"<<robot.getJsim()<<std::endl;
+        std::cout<<"#############C_m#################"<<robot.getCoriolis()<<std::endl;
+        std::cout<<"#############N_m#################"<<-robot.getGravity()<<std::endl;
+        //modified [mpc parameters]
+        // Extract desired pose
+        KDL::Frame des_pose = KDL::Frame::Identity();
+        KDL::Twist des_cart_vel = KDL::Twist::Zero(), des_cart_acc = KDL::Twist::Zero();
+        if (t < init_time_slot) // wait a second
         {
-            // Update robot
-            robot.update(jnt_pos, jnt_vel);
-
-            // Update time
-            t = (ros::Time::now()-begin).toSec();
+            p = planner.compute_trajectory(0.0);
+        }
+        else if(t > init_time_slot && t <= traj_duration + init_time_slot)
+        {
+            p = planner.compute_trajectory(t-init_time_slot);
             //modified [mpc parameters]
-            obj_t = obj.getBodyVelocity();
-            obj_t_Eigen << toEigen((obj_t.vel)), toEigen((obj_t.rot)); 
-            pVEC_ref.clear(); //empty the std vector to push back again
-            // xx.clear();
-            Jb = robot.getObjBodyJac().data;
-            Jb_t = Jb.transpose();
-            iJb = weightedPseudoInverse(Eigen::Matrix<double,7,7>::Identity(),Jb);
-            diJb = Eigen::Matrix<double,7,6>::Zero();
-            M_ = combinedM(robot.getJsim(),obj.getMassMatrix(),iJb);//,iJb,M_m);
-            Co = obj.getCoriolisMatrix();
-            No = -obj.getGravity();
-            // C_ = combinedC(robot.getJsim(),robot.getCoriolis(),Co,iJb,diJb);
-            N_ = combinedN(-robot.getGravity(),No,iJb);
-            //modified [mpc parameters]
-            // Extract desired pose
-            KDL::Frame des_pose = KDL::Frame::Identity();
-            KDL::Twist des_cart_vel = KDL::Twist::Zero(), des_cart_acc = KDL::Twist::Zero();
-            if (t < init_time_slot) // wait a second
-            {
-                p = planner.compute_trajectory(0.0);
+            for (int i = 0; i < MPC_HORIZON; ++i){
+                p_future[i] = planner.compute_trajectory(t+i*epsilon_t-init_time_slot);
+                // std::cout<<"p_future: "<<p_future[i].pos<<" "<<p_future[i].vel<<"\n";
+                Eigen::Matrix<double, 6, 1> vel_ref = Eigen::Matrix<double, 6, 1>::Zero();
+                Eigen::Matrix<double, 6, 1> acc_ref = Eigen::Matrix<double, 6, 1>::Zero();
+                vel_ref << p_future[i].vel[0], p_future[i].vel[1], p_future[i].vel[2], 0, 0, 0;
+                acc_ref << p_future[i].acc[0], p_future[i].acc[1], p_future[i].acc[2], 0, 0, 0; 
+                tau_ref.block(i,0, 1, 7) = (Jb_t*(M_*acc_ref + C_*vel_ref + N_)).transpose(); //not exactly accurate ref as state of robot + obj is not updated  
+                Fb_star = obj.getMassMatrix()*acc_ref + Co*vel_ref + No;
+                lam_ref.block(i, 0, 1, 16) = (weightedPseudoInverse(Eigen::Matrix<double,16,16>::Identity(),G*Fc_hat)*Fb_star).transpose();
             }
-            else if(t > init_time_slot && t <= traj_duration + init_time_slot)
+            std::cout<<"tau_ref: "<<tau_ref<<std::endl; 
+            std::cout<<"lam_ref: "<<lam_ref<<std::endl;        
+            oZYX << x0[4], x0[5], x0[6];
+            pVEC_ref = ref(oZYX, p_future, lam_ref);
+            pVEC_ref_ = Eigen::Map<Eigen::VectorXd>(pVEC_ref.data(), pVEC_ref.size());
+            // Eigen matrices are stored in column major order by default
+            pVEC << (Eigen::Map<Eigen::VectorXd>(M_.data(), M_.cols()*M_.rows())), 
+                    (Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())),
+                    N_,(Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())),
+                    No,(Eigen::Map<Eigen::VectorXd>(Jb_t.data(), Jb_t.cols()*Jb_t.rows())),
+                    x0,pVEC_ref_;
+            // std::cout<<"pVEC updated "<<pVEC<<std::endl;
+            for (int i = 0; i < MPC_HORIZON+1; ++i)
             {
-                p = planner.compute_trajectory(t-init_time_slot);
-                //modified [mpc parameters]
-                for (int i = 0; i < MPC_HORIZON; ++i){
-                    p_future[i] = planner.compute_trajectory(t+i*epsilon_t-init_time_slot);
-                    // std::cout<<"p_future: "<<p_future[i].pos<<" "<<p_future[i].vel<<"\n";
-                    Eigen::Matrix<double, 6, 1> vel_ref = Eigen::Matrix<double, 6, 1>::Zero();
-                    Eigen::Matrix<double, 6, 1> acc_ref = Eigen::Matrix<double, 6, 1>::Zero();
-                    vel_ref << p_future[i].vel[0], p_future[i].vel[1], p_future[i].vel[2], 0, 0, 0;
-                    acc_ref << p_future[i].acc[0], p_future[i].acc[1], p_future[i].acc[2], 0, 0, 0; 
-                    tau_ref.block(i,0, 1, 7) = (Jb_t*(M_*acc_ref + C_*vel_ref + N_)).transpose(); //not exactly accurate ref as state of robot + obj is not updated  
-                    Fb_star = obj.getMassMatrix()*acc_ref + Co*vel_ref + No;
-                    lam_ref.block(i, 0, 1, 16) = (weightedPseudoInverse(Eigen::Matrix<double,16,16>::Identity(),G*Fc_hat)*Fb_star).transpose();
-                }
-                std::cout<<"tau_ref: "<<tau_ref<<std::endl; 
-                std::cout<<"lam_ref: "<<lam_ref<<std::endl;        
-                oZYX << x0[4], x0[5], x0[6];
-                pVEC_ref = ref(oZYX, p_future, lam_ref);
-                pVEC_ref_ = Eigen::Map<Eigen::VectorXd>(pVEC_ref.data(), pVEC_ref.size());
-                // Eigen matrices are stored in column major order by default
-                pVEC << (Eigen::Map<Eigen::VectorXd>(M_.data(), M_.cols()*M_.rows())), 
-                        (Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())),
-                        N_,(Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())),
-                        No,(Eigen::Map<Eigen::VectorXd>(Jb_t.data(), Jb_t.cols()*Jb_t.rows())),
-                        x0,pVEC_ref_;
-                // std::cout<<"pVEC updated "<<pVEC<<std::endl;
-                for (int i = 0; i < MPC_HORIZON+1; ++i)
-                {
-                    for (int j = 0; j < n_states; ++j)
-                        args_x0(i*n_states+j) = X0(i,j);
-                }
-                for (int i = 0; i < MPC_HORIZON; ++i)
-                {
-                    for (int j = 0; j < n_controls; ++j)
-                        args_x0(n_states*(MPC_HORIZON+1)+i*n_controls+j) = u0(i,j); 
-                }
-                args_x0_cas = toCasadi(args_x0); //this is extended x
-                p_cas = toCasadi(pVEC);
-                arg = {args_x0_cas,p_cas,lbx_cas,ubx_cas,lbg_cas,ubg_cas,0,0};
-                auto start = std::chrono::steady_clock::now();
-                res = solv(arg); //call the solver
-                auto end = std::chrono::steady_clock::now();
-                elapsed_seconds = end-start; 
-                std::cout << "elapsed time: " << elapsed_seconds.count() << "s\n";
-                std::cout << "Objective at solution = " << res.at(1) << std::endl;
-                sol_cas = res.at(0); //solution from the solver
-                // convert solution for casadi to eigen
-                auto sol_vec = static_cast<std::vector<double>>(sol_cas);
-                Eigen::Matrix<double, (MPC_HORIZON+1)*n_states+MPC_HORIZON*n_controls, 1> sol_eig(sol_vec.data());
-                // std::cout<<"sol entire: "<<sol_eig<<std::endl;
-                sol_ct_all << sol_eig.block((MPC_HORIZON+1)*n_states,0,MPC_HORIZON*n_controls,1);
-                Eigen::Map<Eigen::MatrixXd> sol_ct_temp(sol_ct_all.data(), n_controls, MPC_HORIZON); 
-                sol_ct_colWise = sol_ct_temp.transpose();
-                sol_ct_first = sol_ct_colWise.block(0,0,1,n_controls);//(1,Eigen::all);
-                sol_ct_last = sol_ct_colWise.block(MPC_HORIZON-1, 0, 1, n_controls);
-                //should account for MPC_HORIZON=1
-                // if (MPC_HORIZON > 1)
-                sol_ct_rest = sol_ct_colWise.block(1, 0, (MPC_HORIZON-1), n_controls);
-                // else 
-                //     Eigen::MatrixXd sol_ct_rest = Eigen;
-                t_mpc[mpciter+1] = t0;
-                sol_ct_first_cas = toCasadi(sol_ct_first);
-                x0_cas = toCasadi(x0);
-                Co_cas = toCasadi((Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())));
-                No_cas = toCasadi(No);
-                std::cout<<"sol first: "<<sol_ct_first<<std::endl;
-                argF = {x0_cas,sol_ct_first_cas,Co_cas,No_cas};
-                f_value = fDYN(argF); //call the dynamic fucntion
-                rhs_cas = f_value.at(0);
-                // convert from casadi to eigen
-                auto rhs_vec = static_cast<std::vector<double>>(rhs_cas);
-                Eigen::Matrix<double, n_states, 1> rhs_eig(rhs_vec.data());
-                // std::cout<<"rhs: "<<rhs_eig<<std::endl;
-                // std::cout<<"u0 before shift"<<u0<<std::endl;
-                t_sh_now = (ros::Time::now()-begin).toSec();
-                shift((t_sh_now-t_sh_prev), t0, x0, u0, sol_ct_first, sol_ct_rest, sol_ct_last, rhs_eig);
-                t_sh_prev = t_sh_now;
-                // std::cout<<"x0 after shift"<<x0<<std::endl;
-                // std::cout<<"u0 after shift"<<u0<<std::endl; 
-                for (int i = 0; i < n_states; ++i)
-                    xx.push_back(x0[i]);
-                xx_out.row(mpciter+1) << x0.transpose();
-                // std::cout<<"xx final"<<xx<<std::endl;
-                Eigen::Map<Eigen::MatrixXd> X0_temp(sol_eig.block(0,0,(MPC_HORIZON+1)*n_states,1).data(), n_states, MPC_HORIZON+1);
-                X0 = X0_temp.transpose();
-                // shift trajectory to initialize the next step
-                X0 << X0.block(1,0,MPC_HORIZON,n_states), X0.block(MPC_HORIZON-1,0,1,n_states);
-                std::cout<<"mpciter: "<<mpciter<<"\n";
-                mpciter += 1;
-                // std::cout<<"xx_out: "<<xx_out<<"\n";
+                for (int j = 0; j < n_states; ++j)
+                    args_x0(i*n_states+j) = X0(i,j);
+            }
+            for (int i = 0; i < MPC_HORIZON; ++i)
+            {
+                for (int j = 0; j < n_controls; ++j)
+                    args_x0(n_states*(MPC_HORIZON+1)+i*n_controls+j) = u0(i,j); 
+            }
+            args_x0_cas = toCasadi(args_x0); //this is extended x
+            p_cas = toCasadi(pVEC);
+            arg = {args_x0_cas,p_cas,lbx_cas,ubx_cas,lbg_cas,ubg_cas,0,0};
+            auto start = std::chrono::steady_clock::now();
+            res = solv(arg); //call the solver
+            auto end = std::chrono::steady_clock::now();
+            elapsed_seconds = end-start; 
+            std::cout << "elapsed time: " << elapsed_seconds.count() << "s\n";
+            std::cout << "Objective at solution = " << res.at(1) << std::endl;
+            sol_cas = res.at(0); //solution from the solver
+            // convert solution for casadi to eigen
+            auto sol_vec = static_cast<std::vector<double>>(sol_cas);
+            Eigen::Matrix<double, (MPC_HORIZON+1)*n_states+MPC_HORIZON*n_controls, 1> sol_eig(sol_vec.data());
+            // std::cout<<"sol entire: "<<sol_eig<<std::endl;
+            sol_ct_all << sol_eig.block((MPC_HORIZON+1)*n_states,0,MPC_HORIZON*n_controls,1);
+            Eigen::Map<Eigen::MatrixXd> sol_ct_temp(sol_ct_all.data(), n_controls, MPC_HORIZON); 
+            sol_ct_colWise = sol_ct_temp.transpose();
+            sol_ct_first = sol_ct_colWise.block(0,0,1,n_controls);//(1,Eigen::all);
+            sol_ct_last = sol_ct_colWise.block(MPC_HORIZON-1, 0, 1, n_controls);
+            //should account for MPC_HORIZON=1
+            // if (MPC_HORIZON > 1)
+            sol_ct_rest = sol_ct_colWise.block(1, 0, (MPC_HORIZON-1), n_controls);
+            // else 
+            //     Eigen::MatrixXd sol_ct_rest = Eigen;
+            t_mpc[mpciter+1] = t0;
+            sol_ct_first_cas = toCasadi(sol_ct_first);
+            x0_cas = toCasadi(x0);
+            Co_cas = toCasadi((Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())));
+            No_cas = toCasadi(No);
+            std::cout<<"sol first: "<<sol_ct_first<<std::endl;
+            argF = {x0_cas,sol_ct_first_cas,Co_cas,No_cas};
+            f_value = fDYN(argF); //call the dynamic fucntion
+            rhs_cas = f_value.at(0);
+            // convert from casadi to eigen
+            auto rhs_vec = static_cast<std::vector<double>>(rhs_cas);
+            Eigen::Matrix<double, n_states, 1> rhs_eig(rhs_vec.data());
+            // std::cout<<"rhs: "<<rhs_eig<<std::endl;
+            // std::cout<<"u0 before shift"<<u0<<std::endl;
+            t_sh_now = (ros::Time::now()-begin).toSec();
+            shift((t_sh_now-t_sh_prev), t0, x0, u0, sol_ct_first, sol_ct_rest, sol_ct_last, rhs_eig);
+            t_sh_prev = t_sh_now;
+            // std::cout<<"x0 after shift"<<x0<<std::endl;
+            // std::cout<<"u0 after shift"<<u0<<std::endl; 
+            for (int i = 0; i < n_states; ++i)
+                xx.push_back(x0[i]);
+            xx_out.row(mpciter+1) << x0.transpose();
+            // std::cout<<"xx final"<<xx<<std::endl;
+            Eigen::Map<Eigen::MatrixXd> X0_temp(sol_eig.block(0,0,(MPC_HORIZON+1)*n_states,1).data(), n_states, MPC_HORIZON+1);
+            X0 = X0_temp.transpose();
+            // shift trajectory to initialize the next step
+            X0 << X0.block(1,0,MPC_HORIZON,n_states), X0.block(MPC_HORIZON-1,0,1,n_states);
+            std::cout<<"mpciter: "<<mpciter<<"\n";
+            mpciter += 1;
+            // std::cout<<"xx_out: "<<xx_out<<"\n";
 
-                //compute torque using IK
-                // oZYX << x0[4], x0[5], x0[6];
-                // R_wb_current = zyx2R(oZYX);
-                // for (int i = 0; i < 3; ++i)
-                // {
-                //     for (int j = 0; j < 3; ++j)
-                //         T_wb_current(i,j) = R_wb_current(i,j); 
-                // }
-                // T_wb_current(0,3) = x0[0]; T_wb_current(1,3) = x0[1]; T_wb_current(2,3) = x0[2];
-                // T_wb_current(3,3) = 1;
-                // T_we_current = T_wb_current*T_eb.inverse();
-                // R_we = R_wb_current*R_eb.inverse();
-                // // tf::transformEigenToKDL(T_wb_current, T_we_kdl);
-                // fromEigenToKDL(T_we_current, T_we_kdl); 
-                // ikSol_->CartToJnt(q_prev,T_we_kdl,q_new);
-                // q_new = LWR.ikcon(T_we_current,q_prev');
-                // q_current_op = q_new'; 
-                // q_log = [q_log q_current_op];
-                // %     dq_current = (q_current-q_prev)/h;
-                // robot.update(fromKDLToVec(q_new),fromKDLToVec(dq_prev));
-                // // Je_current = LWR.jacob0(q_current_op');
-                // // %Je_current = computeJe(d3,d5,d7,q_current_op);
-                // // R_we = R_wb_current*R_eb'; %rotation of ee frame wrt world frame
-                // Jb = robot.getObjBodyJac().data;
-                // iJb = weightedPseudoInverse(Eigen::Matrix<double,7,7>::Identity(),Jb);
-                // // Jb = Ad_eb\(blkdiag(R_we',R_we')*Je_current);
-                // // iJb = pinv(Jb); diJb = zeros(7,6);
-                // dq_new = iJb*x0.block(6,0,6,1);
-                // // dq_current_op = pinv(Jb)*x0(7:12);
-                // // dq_log = [dq_log dq_current_op]; %vel output of MPC is already in B frame
-                // // //IK part finishes
-                // M_ = combinedM(robot.getJsim(),obj.getMassMatrix(),iJb);//,iJb,M_m);
-                // Co = obj.getCoriolisMatrix();
-                // No = obj.getGravity();
-                // // C_ = combinedC(robot.getJsim(),robot.getCoriolis(),Co,iJb,diJb);
-                // N_ = combinedN(robot.getGravity(),No,iJb);
-                x_prev = xx_out.row(mpciter).transpose();
-                // tau_mpc = Jb.transpose()*(M_*(x0.block(6,0,6,1) - x_prev.block(6,0,6,1))/h + C_*x0.block(6,0,6,1) + N_);
-                t_tau_now = (ros::Time::now()-begin).toSec();
-                tau_mpc = Jb_t*(M_*(x0.block(6,0,6,1) - obj_t_Eigen)/(t_tau_now-t_tau_prev) + C_*x0.block(6,0,6,1) + N_);
-                t_tau_prev = t_tau_now;
-                std::cout<<"tau mpc: "<<tau_mpc<<"\n";
-                std::cout<<"Jbt: "<<Jb_t<<"\n";
-                std::cout<<"M_: "<<M_<<"\n";
-                std::cout<<"C_: "<<C_<<"\n";
-                std::cout<<"N_: "<<N_<<"\n";
-                std::cout<<"ddx: "<<(x0.block(6,0,6,1) - obj_t_Eigen)/h<<"\n";
-                std::cout<<"dx: "<<x0.block(6,0,6,1)<<"\n";
-                return 0;
-                //modified [mpc parameters]
+            //compute torque using IK
+            // oZYX << x0[4], x0[5], x0[6];
+            // R_wb_current = zyx2R(oZYX);
+            // for (int i = 0; i < 3; ++i)
+            // {
+            //     for (int j = 0; j < 3; ++j)
+            //         T_wb_current(i,j) = R_wb_current(i,j); 
+            // }
+            // T_wb_current(0,3) = x0[0]; T_wb_current(1,3) = x0[1]; T_wb_current(2,3) = x0[2];
+            // T_wb_current(3,3) = 1;
+            // T_we_current = T_wb_current*T_eb.inverse();
+            // R_we = R_wb_current*R_eb.inverse();
+            // // tf::transformEigenToKDL(T_wb_current, T_we_kdl);
+            // fromEigenToKDL(T_we_current, T_we_kdl); 
+            // ikSol_->CartToJnt(q_prev,T_we_kdl,q_new);
+            // q_new = LWR.ikcon(T_we_current,q_prev');
+            // q_current_op = q_new'; 
+            // q_log = [q_log q_current_op];
+            // %     dq_current = (q_current-q_prev)/h;
+            // robot.update(fromKDLToVec(q_new),fromKDLToVec(dq_prev));
+            // // Je_current = LWR.jacob0(q_current_op');
+            // // %Je_current = computeJe(d3,d5,d7,q_current_op);
+            // // R_we = R_wb_current*R_eb'; %rotation of ee frame wrt world frame
+            // Jb = robot.getObjBodyJac().data;
+            // iJb = weightedPseudoInverse(Eigen::Matrix<double,7,7>::Identity(),Jb);
+            // // Jb = Ad_eb\(blkdiag(R_we',R_we')*Je_current);
+            // // iJb = pinv(Jb); diJb = zeros(7,6);
+            // dq_new = iJb*x0.block(6,0,6,1);
+            // // dq_current_op = pinv(Jb)*x0(7:12);
+            // // dq_log = [dq_log dq_current_op]; %vel output of MPC is already in B frame
+            // // //IK part finishes
+            // M_ = combinedM(robot.getJsim(),obj.getMassMatrix(),iJb);//,iJb,M_m);
+            // Co = obj.getCoriolisMatrix();
+            // No = obj.getGravity();
+            // // C_ = combinedC(robot.getJsim(),robot.getCoriolis(),Co,iJb,diJb);
+            // N_ = combinedN(robot.getGravity(),No,iJb);
+            x_prev = xx_out.row(mpciter).transpose();
+            // tau_mpc = Jb.transpose()*(M_*(x0.block(6,0,6,1) - x_prev.block(6,0,6,1))/h + C_*x0.block(6,0,6,1) + N_);
+            t_tau_now = (ros::Time::now()-begin).toSec();
+            tau_mpc = Jb_t*(M_*(x0.block(6,0,6,1) - obj_t_Eigen)/(t_tau_now-t_tau_prev) + C_*x0.block(6,0,6,1) + N_);
+            t_tau_prev = t_tau_now;
+            std::cout<<"tau mpc: "<<tau_mpc<<"\n";
+            std::cout<<"Jbt: "<<Jb_t<<"\n";
+            std::cout<<"M_: "<<M_<<"\n";
+            std::cout<<"C_: "<<C_<<"\n";
+            std::cout<<"N_: "<<N_<<"\n";
+            std::cout<<"ddx: "<<(x0.block(6,0,6,1) - obj_t_Eigen)/h<<"\n";
+            std::cout<<"dx: "<<x0.block(6,0,6,1)<<"\n";
+            // return 0;
+            //modified [mpc parameters]
 //                double x = p.pos.x()+ 0.1*sin(2*t);
 //                p.pos.x() = x;
-                des_cart_vel = KDL::Twist(KDL::Vector(p.vel[0], p.vel[1], p.vel[2]),KDL::Vector::Zero());
-                des_cart_acc = KDL::Twist(KDL::Vector(p.acc[0], p.acc[1], p.acc[2]),KDL::Vector::Zero());
-            }
-            else
-            {
-                ROS_INFO_STREAM_ONCE("trajectory terminated");
-            }
+            des_cart_vel = KDL::Twist(KDL::Vector(p.vel[0], p.vel[1], p.vel[2]),KDL::Vector::Zero());
+            des_cart_acc = KDL::Twist(KDL::Vector(p.acc[0], p.acc[1], p.acc[2]),KDL::Vector::Zero());
+        }
+        else
+        {
+            ROS_INFO_STREAM_ONCE("trajectory terminated");
+        }
 
-            des_pose.p = KDL::Vector(p.pos[0],p.pos[1],p.pos[2]);
+        des_pose.p = KDL::Vector(p.pos[0],p.pos[1],p.pos[2]);
 
 #if USE_SHARED_CNTR
-            // tau = controller_.sharedCntr(des_pose, des_cart_vel, des_cart_acc, Kp, Kd);
-            tau = tau_mpc;
+        // tau = controller_.sharedCntr(des_pose, des_cart_vel, des_cart_acc, Kp, Kd);
+        tau = tau_mpc;
+        std::cout << "tau: " << tau.transpose() << std::endl;
 #endif //USE_SHARED_CNTR
 
 #if USE_JNT_ID
@@ -824,121 +866,137 @@ int main(int argc, char **argv)
 //            // joint space inverse dynamics control
 //            tau = controller_.idCntr(qd, dqd, ddqd, Kp, Kd);
 #else
-            double Kp = 1000;
-            double Ko = 1000;
-            // Cartesian space inverse dynamics control
-            tau = controller_.idCntr(des_pose, des_cart_vel, des_cart_acc,
-                                     Kp, Ko, 2*sqrt(Kp), 2*sqrt(Ko));
+        double Kp = 1000;
+        double Ko = 1000;
+        // Cartesian space inverse dynamics control
+        tau = controller_.idCntr(des_pose, des_cart_vel, des_cart_acc,
+                                 Kp, Ko, 2*sqrt(Kp), 2*sqrt(Ko));
 #endif
 
 #if SAVE_DATA
-            double ad,bd,cd, a,b,c;
-            KDL::Frame T = robot.getCartesianPose();
-            KDL::Twist V = robot.getCartesianVelocity();
-            Eigen::VectorXd jnt_pos = robot.getJntValues(), jnt_vel = robot.getJntVelocities();
+        double ad,bd,cd, a,b,c;
+        KDL::Frame T = robot.getCartesianPose();
+        KDL::Twist V = robot.getCartesianVelocity();
+        Eigen::VectorXd jnt_pos = robot.getJntValues(), jnt_vel = robot.getJntVelocities();
 
-            des_pose.M.GetEulerZYX(ad,bd,cd);
-            T.M.GetEulerZYX(a,b,c);
+        des_pose.M.GetEulerZYX(ad,bd,cd);
+        T.M.GetEulerZYX(a,b,c);
 
-            path_file << des_pose.p.x() << " " << des_pose.p.y() << " " << des_pose.p.z() << " "
-                      << ad << " " << bd << " " << cd << " "
+        path_file << des_pose.p.x() << " " << des_pose.p.y() << " " << des_pose.p.z() << " "
+                  << ad << " " << bd << " " << cd << " "
 
-                      << des_cart_vel.vel.x() << " " << des_cart_vel.vel.y() << " " << des_cart_vel.vel.z() << " "
-                      << des_cart_vel.rot.x() << " " << des_cart_vel.rot.y() << " " << des_cart_vel.rot.z() << " "
+                  << des_cart_vel.vel.x() << " " << des_cart_vel.vel.y() << " " << des_cart_vel.vel.z() << " "
+                  << des_cart_vel.rot.x() << " " << des_cart_vel.rot.y() << " " << des_cart_vel.rot.z() << " "
 
-                      << des_cart_acc.vel.x() << " " << des_cart_acc.vel.y() << " " << des_cart_acc.vel.z() << " "
-                      << des_cart_acc.rot.x() << " " << des_cart_acc.rot.y() << " " << des_cart_acc.rot.z() << "\n";
+                  << des_cart_acc.vel.x() << " " << des_cart_acc.vel.y() << " " << des_cart_acc.vel.z() << " "
+                  << des_cart_acc.rot.x() << " " << des_cart_acc.rot.y() << " " << des_cart_acc.rot.z() << "\n";
 
-            robot_file << T.p.x() << " " << T.p.y() << " " << T.p.z() << " "
-                       << a << " " << b << " " << c << " "
+        robot_file << T.p.x() << " " << T.p.y() << " " << T.p.z() << " "
+                   << a << " " << b << " " << c << " "
 
-                       << V.vel.x() << " " << V.vel.y() << " " << V.vel.z() << " "
-                       << V.rot.x() << " " << V.rot.y() << " " << V.rot.z() << " "
+                   << V.vel.x() << " " << V.vel.y() << " " << V.vel.z() << " "
+                   << V.rot.x() << " " << V.rot.y() << " " << V.rot.z() << " "
 
-                       << tau[0] << " " << tau[1] << " " << tau[2] << " "
-                       << tau[3] << " " << tau[4] << " " << tau[5] << " "
-                       << tau[6] << " "
+                   << tau[0] << " " << tau[1] << " " << tau[2] << " "
+                   << tau[3] << " " << tau[4] << " " << tau[5] << " "
+                   << tau[6] << " "
 
-                       << qd.data[0] << " " << qd.data[1] << " " << qd.data[2] << " "
-                       << qd.data[3] << " " << qd.data[4] << " " << qd.data[5] << " "
-                       << qd.data[6] << " "
+                   << qd.data[0] << " " << qd.data[1] << " " << qd.data[2] << " "
+                   << qd.data[3] << " " << qd.data[4] << " " << qd.data[5] << " "
+                   << qd.data[6] << " "
 
-                       << dqd.data[0] << " " << dqd.data[1] << " " << dqd.data[2] << " "
-                       << dqd.data[3] << " " << dqd.data[4] << " " << dqd.data[5] << " "
-                       << dqd.data[6] << " "
+                   << dqd.data[0] << " " << dqd.data[1] << " " << dqd.data[2] << " "
+                   << dqd.data[3] << " " << dqd.data[4] << " " << dqd.data[5] << " "
+                   << dqd.data[6] << " "
 
-                       << ddqd.data[0] << " " << ddqd.data[1] << " " << ddqd.data[2] << " "
-                       << ddqd.data[3] << " " << ddqd.data[4] << " " << ddqd.data[5] << " "
-                       << ddqd.data[6] << " "
+                   << ddqd.data[0] << " " << ddqd.data[1] << " " << ddqd.data[2] << " "
+                   << ddqd.data[3] << " " << ddqd.data[4] << " " << ddqd.data[5] << " "
+                   << ddqd.data[6] << " "
 
-                       << jnt_pos[0] << " " << jnt_pos[1] << " " << jnt_pos[2] << " "
-                       << jnt_pos[3] << " " << jnt_pos[4] << " " << jnt_pos[5] << " "
-                       << jnt_pos[6] << " "
+                   << jnt_pos[0] << " " << jnt_pos[1] << " " << jnt_pos[2] << " "
+                   << jnt_pos[3] << " " << jnt_pos[4] << " " << jnt_pos[5] << " "
+                   << jnt_pos[6] << " "
 
-                       << jnt_vel[0] << " " << jnt_vel[1] << " " << jnt_vel[2] << " "
-                       << jnt_vel[3] << " " << jnt_vel[4] << " " << jnt_vel[5] << " "
-                       << jnt_vel[6] << "\n";
+                   << jnt_vel[0] << " " << jnt_vel[1] << " " << jnt_vel[2] << " "
+                   << jnt_vel[3] << " " << jnt_vel[4] << " " << jnt_vel[5] << " "
+                   << jnt_vel[6] << "\n";
 
-            obj_file << obj_pos[0] << " " << obj_pos[1] << " " << obj_pos[2] << " "
-                                   << obj_pos[3] << " " << obj_pos[4] << " " << obj_pos[5] << " "
-                                   << obj_vel[0] << " " << obj_vel[1] << " " << obj_vel[2] << " "
-                                   << obj_vel[3] << " " << obj_vel[4] << " " << obj_vel[5] << "\n";
+        obj_file << obj_pos[0] << " " << obj_pos[1] << " " << obj_pos[2] << " "
+                               << obj_pos[3] << " " << obj_pos[4] << " " << obj_pos[5] << " "
+                               << obj_vel[0] << " " << obj_vel[1] << " " << obj_vel[2] << " "
+                               << obj_vel[3] << " " << obj_vel[4] << " " << obj_vel[5] << "\n";
 
-            path_file.flush();
-            robot_file.flush();
-            obj_file.flush();
+        path_file.flush();
+        robot_file.flush();
+        obj_file.flush();
 #endif
-            // Set torques
-            tau1_msg.data = tau[0];
-            tau2_msg.data = tau[1];
-            tau3_msg.data = tau[2];
-            tau4_msg.data = tau[3];
-            tau5_msg.data = tau[4];
-            tau6_msg.data = tau[5];
-            tau7_msg.data = tau[6];
+        // Set torques
+        /*
+        tau1_msg.data = tau[0];
+        tau2_msg.data = tau[1];
+        tau3_msg.data = tau[2];
+        tau4_msg.data = tau[3];
+        tau5_msg.data = tau[4];
+        tau6_msg.data = tau[5];
+        tau7_msg.data = tau[6];
+        */
+        tau_msg.data[0] = tau[0];
+        tau_msg.data[1] = tau[1];
+        tau_msg.data[2] = tau[2];
+        tau_msg.data[3] = tau[3];
+        tau_msg.data[4] = tau[4];
+        tau_msg.data[5] = tau[5];
+        tau_msg.data[6] = tau[6];
 
-            // Publish
-            joint1_effort_pub.publish(tau1_msg);
-            joint2_effort_pub.publish(tau2_msg);
-            joint3_effort_pub.publish(tau3_msg);
-            joint4_effort_pub.publish(tau4_msg);
-            joint5_effort_pub.publish(tau5_msg);
-            joint6_effort_pub.publish(tau6_msg);
-            joint7_effort_pub.publish(tau7_msg);
+        // Publish
+        // joint1_effort_pub.publish(tau1_msg);
+        /*
+        joint2_effort_pub.publish(tau2_msg);
+        joint3_effort_pub.publish(tau3_msg);
+        joint4_effort_pub.publish(tau4_msg);
+        joint5_effort_pub.publish(tau5_msg);
+        joint6_effort_pub.publish(tau6_msg);
+        joint7_effort_pub.publish(tau7_msg);
+        */
+        //
+        //joint_tor_pub.publish(tau_msg);
+        //
+        //pauseGazebo.call(pauseSrv);
 
 #if DEBUG
-            std::cout << "jacobian: " << std::endl << robot.getJacobian() << std::endl;
-            std::cout << "jsim: " << std::endl << robot.getJsim() << std::endl;
-            std::cout << "c: " << std::endl << robot.getCoriolis().transpose() << std::endl;
-            std::cout << "g: " << std::endl << robot.getGravity().transpose() << std::endl;
-            std::cout << "qd: " << std::endl << qd.data.transpose() << std::endl;
-            std::cout << "q: " << std::endl << robot.getJntValues().transpose() << std::endl;
-            std::cout << "tau: " << std::endl << tau.transpose() << std::endl;
-            std::cout << "desired_pose: " << std::endl << des_pose << std::endl;
-            std::cout << "current_pose: " << std::endl << robot.getCartesianPose() << std::endl;
+        std::cout << "jacobian: " << std::endl << robot.getJacobian() << std::endl;
+        std::cout << "jsim: " << std::endl << robot.getJsim() << std::endl;
+        std::cout << "c: " << std::endl << robot.getCoriolis().transpose() << std::endl;
+        std::cout << "g: " << std::endl << robot.getGravity().transpose() << std::endl;
+        std::cout << "qd: " << std::endl << qd.data.transpose() << std::endl;
+        std::cout << "q: " << std::endl << robot.getJntValues().transpose() << std::endl;
+        std::cout << "tau: " << std::endl << tau.transpose() << std::endl;
+        std::cout << "desired_pose: " << std::endl << des_pose << std::endl;
+        std::cout << "current_pose: " << std::endl << robot.getCartesianPose() << std::endl;
 #endif
 
-            /*des_pose_init_state.request.link_state.pose.position.x = p.pos.x();
-            des_pose_init_state.request.link_state.pose.position.y = p.pos.y();
-            des_pose_init_state.request.link_state.pose.position.z = p.pos.z();
-            if(des_pose_set_state_srv.call(des_pose_init_state))
-                ROS_INFO("Desired pose state set.");
-            else
-                ROS_INFO("Failed to set desired pose state.");
-            */
-            
-            ros::spinOnce();
-            loop_rate.sleep();
-            // pauseGazebo.call(pauseSrv);
-            // int n;
-            // std::cin >> n;
-        }
+        /*des_pose_init_state.request.link_state.pose.position.x = p.pos.x();
+        des_pose_init_state.request.link_state.pose.position.y = p.pos.y();
+        des_pose_init_state.request.link_state.pose.position.z = p.pos.z();
+        if(des_pose_set_state_srv.call(des_pose_init_state))
+            ROS_INFO("Desired pose state set.");
+        else
+            ROS_INFO("Failed to set desired pose state.");
+        */
+        // unpauseGazebo.call(pauseSrv);
+        ros::spinOnce();
+        // pauseGazebo.call(pauseSrv);
+        loop_rate.sleep();
+        
+        // int n;
+        // std::cin >> n;
     }
+    /*
     if(pauseGazebo.call(pauseSrv))
         ROS_INFO("Simulation paused.");
     else
         ROS_INFO("Failed to pause simulation.");
-
+    */
 
     return 0;
 }
