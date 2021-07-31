@@ -5,6 +5,7 @@
     <plugin name="gazebo_ros_controller" filename="libgazebo_ros_control.so">
       <robotNamespace>/lbr_iiwa</robotNamespace>
     </plugin>
+
   </gazebo>
 
 </robot>

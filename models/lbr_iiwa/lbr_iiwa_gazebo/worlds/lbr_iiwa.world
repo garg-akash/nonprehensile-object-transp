@@ -12,6 +12,8 @@
       <uri>model://sun</uri>
     </include>
 
+    <plugin filename="libstep_ctrl.so" name="step_ctrl"/>
+
     <!-- Focus camera -->
     <gui fullscreen='0'>
       <camera name='user_camera'>

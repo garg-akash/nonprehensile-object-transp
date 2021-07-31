@@ -7,7 +7,7 @@ add_compile_options(-std=c++11)
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
-find_package(catkin REQUIRED COMPONENTS roscpp rospy std_msgs genmsg eigen_conversions kdl_ros_control message_generation shared_control_msgs kdl_parser)
+find_package(catkin REQUIRED COMPONENTS roscpp rospy std_msgs genmsg eigen_conversions kdl_ros_control message_generation shared_control_msgs kdl_parser orocos_kdl)
 find_package(Eigen3 REQUIRED)
 
 set (nlpN3_PATH "\"${PROJECT_SOURCE_DIR}\"")
@@ -157,7 +157,7 @@ add_dependencies(${PROJECT_NAME}-iiwa_node ${${PROJECT_NAME}_EXPORTED_TARGETS} $
 ## Specify libraries to link a library or executable target against
 target_link_libraries(${PROJECT_NAME}-iiwa_node
   ${catkin_LIBRARIES}
-  orocos-kdl
+  #orocos-kdl
   #kdl_parser
   kdl_ros_control
   casadi
