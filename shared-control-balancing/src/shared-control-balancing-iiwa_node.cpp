@@ -27,6 +27,7 @@
 #include "std_msgs/Float64MultiArray.h"
 #include "std_msgs/Bool.h"
 #include <shared_control_msgs/GetTorques.h>
+#include <shared_control_msgs/requestCalc.h>
 
 
 #define USE_SHARED_CNTR 1
@@ -289,6 +290,19 @@ bool gettorques(shared_control_msgs::GetTorques::Request &req,
     return true;
 }
 
+
+
+bool start_calc(shared_control_msgs::requestCalc::Request &req,
+                shared_control_msgs::requestCalc::Response &res)
+{
+
+    std::cout << "called" << std::endl;
+    robot_state_available = (calculation_done && true);
+
+    return true;
+}
+
+
 // Main
 int main(int argc, char **argv)
 {
@@ -311,13 +325,14 @@ int main(int argc, char **argv)
     std::string path = std::string(nlpN3_PATH);
     std::cout << "Library to load: " << path + "/nlpN3.so\n";
     casadi::Function solv = casadi::nlpsol("solv", "ipopt", path + "/nlpN3.so"); //loading solver
-    casadi::Function fDYN = casadi::external(path + "/f"); //loading the dynamics fucntion
+    casadi::Function fDYN = casadi::external("f"); //loading the dynamics fucntion
     //modified [mpc parameters]
     // Subscribers
     ros::Subscriber joint_state_sub = n.subscribe("/lbr_iiwa/joint_states", 0, jointStateCallback);
     ros::Subscriber synch_sub = n.subscribe("/mpc/sync", 1, synchCallback);
     ros::Subscriber object_state_sub = n.subscribe("/gazebo/link_states", 1, objectStateCallback);
-    ros::ServiceServer service = n.advertiseService("get_torques", gettorques);
+    //ros::ServiceServer service = n.advertiseService("get_torques", gettorques);
+    ros::ServiceServer service = n.advertiseService("start_calc", start_calc);
 
     // Publishers
     // ros::Publisher joint1_effort_pub = n.advertise<std_msgs::Float64>("/lbr_iiwa/lbr_iiwa_joint_1_effort_controller/command", 1);
@@ -878,6 +893,7 @@ int main(int argc, char **argv)
             tau_msg.data[6] = tau_mpc[6];
 
             joint_tor_pub.publish(tau_msg);
+            std::cout << "PUBBBLICO TAU!!!!!" << std::endl;
         }
         else
         {
