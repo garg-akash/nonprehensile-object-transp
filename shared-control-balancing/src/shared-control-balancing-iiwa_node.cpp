@@ -25,6 +25,7 @@
 #include <eigen_conversions/eigen_kdl.h>
 #include "config.h"
 #include "std_msgs/Float64MultiArray.h"
+#include "std_msgs/Bool.h"
 #include <shared_control_msgs/GetTorques.h>
 
 
@@ -36,6 +37,8 @@
 // Global variables
 std::vector<double> jnt_pos(7,0.0), jnt_vel(7,0.0), obj_pos(6,0.0),  obj_vel(6,0.0);
 bool robot_state_available = false, obj_state_available = false;
+bool calculation_done = false;
+bool torque_ready = false;
 double obj_mass;
 std_msgs::Float64MultiArray tau_msg;
 
@@ -243,11 +246,17 @@ void objectStateCallback(const gazebo_msgs::LinkStates & msg)
     obj_state_available = true;
 }
 
+
+void synchCallback( std_msgs::Bool msg ) {
+
+    robot_state_available = (calculation_done && msg.data);
+}
+
+
 void jointStateCallback(const sensor_msgs::JointState & msg)
 {
-    std::cout << "JOINTSTATES" << std::endl;
 
-    robot_state_available = true;
+    //robot_state_available = true;
     jnt_pos.clear();
     jnt_vel.clear();
     for (int i = 0; i < msg.position.size(); i++)
@@ -263,6 +272,11 @@ bool gettorques(shared_control_msgs::GetTorques::Request &req,
                 shared_control_msgs::GetTorques::Response &res)
 {
     //res.b = 60.75;
+
+    if (!torque_ready) return false;
+    //while ( !torque_ready  ) usleep (0.1*1e6);
+    //std::cout << "gettorques" << std::endl;
+
     res.tj0 = tau_msg.data[0];
     res.tj1 = tau_msg.data[1];
     res.tj2 = tau_msg.data[2];
@@ -297,10 +311,11 @@ int main(int argc, char **argv)
     std::string path = std::string(nlpN3_PATH);
     std::cout << "Library to load: " << path + "/nlpN3.so\n";
     casadi::Function solv = casadi::nlpsol("solv", "ipopt", path + "/nlpN3.so"); //loading solver
-    casadi::Function fDYN = casadi::external("f"); //loading the dynamics fucntion
+    casadi::Function fDYN = casadi::external(path + "/f"); //loading the dynamics fucntion
     //modified [mpc parameters]
     // Subscribers
     ros::Subscriber joint_state_sub = n.subscribe("/lbr_iiwa/joint_states", 0, jointStateCallback);
+    ros::Subscriber synch_sub = n.subscribe("/mpc/sync", 1, synchCallback);
     ros::Subscriber object_state_sub = n.subscribe("/gazebo/link_states", 1, objectStateCallback);
     ros::ServiceServer service = n.advertiseService("get_torques", gettorques);
 
@@ -416,12 +431,16 @@ int main(int argc, char **argv)
 
     // Wait for robot and object state
     // unpauseGazebo.call(pauseSrv);
-    while(!robot_state_available || !obj_state_available)
+    calculation_done = true;
+    while(!robot_state_available ) // || !obj_state_available)
     {
         ROS_INFO_STREAM_ONCE("Robot/object state not available yet.");
         ROS_INFO_STREAM_ONCE("Please start gazebo simulation.");
         ros::spinOnce();
+
     }
+    robot_state_available = false;
+
     //pauseGazebo.call(pauseSrv);
 
     // Create robot
@@ -659,11 +678,12 @@ int main(int argc, char **argv)
         //unpauseGazebo.call(pauseSrv);
         //if (robot_state_available)
         //{
-
         while ( !robot_state_available ) {
             usleep(0.1*1e6);
             ros::spinOnce();
         }
+        calculation_done = false;
+
         robot_state_available = false;
 
         std::cout << "robot_state_available" << std::endl;
@@ -686,9 +706,9 @@ int main(int argc, char **argv)
         No = -obj.getGravity();
         // C_ = combinedC(robot.getJsim(),robot.getCoriolis(),Co,iJb,diJb);
         N_ = combinedN(-robot.getGravity(),No,iJb);
-        std::cout<<"#############M_m#################"<<robot.getJsim()<<std::endl;
-        std::cout<<"#############C_m#################"<<robot.getCoriolis()<<std::endl;
-        std::cout<<"#############N_m#################"<<-robot.getGravity()<<std::endl;
+        // std::cout<<"#############M_m#################"<<robot.getJsim()<<std::endl;
+        // std::cout<<"#############C_m#################"<<robot.getCoriolis()<<std::endl;
+        // std::cout<<"#############N_m#################"<<-robot.getGravity()<<std::endl;
         //modified [mpc parameters]
         // Extract desired pose
         KDL::Frame des_pose = KDL::Frame::Identity();
@@ -712,8 +732,8 @@ int main(int argc, char **argv)
                 Fb_star = obj.getMassMatrix()*acc_ref + Co*vel_ref + No;
                 lam_ref.block(i, 0, 1, 16) = (weightedPseudoInverse(Eigen::Matrix<double,16,16>::Identity(),G*Fc_hat)*Fb_star).transpose();
             }
-            std::cout<<"tau_ref: "<<tau_ref<<std::endl; 
-            std::cout<<"lam_ref: "<<lam_ref<<std::endl;        
+            // std::cout<<"tau_ref: "<<tau_ref<<std::endl; 
+            // std::cout<<"lam_ref: "<<lam_ref<<std::endl;        
             oZYX << x0[4], x0[5], x0[6];
             pVEC_ref = ref(oZYX, p_future, lam_ref);
             pVEC_ref_ = Eigen::Map<Eigen::VectorXd>(pVEC_ref.data(), pVEC_ref.size());
@@ -830,19 +850,34 @@ int main(int argc, char **argv)
             t_tau_now = (ros::Time::now()-begin).toSec();
             tau_mpc = Jb_t*(M_*(x0.block(6,0,6,1) - obj_t_Eigen)/(t_tau_now-t_tau_prev) + C_*x0.block(6,0,6,1) + N_);
             t_tau_prev = t_tau_now;
-            std::cout<<"tau mpc: "<<tau_mpc<<"\n";
-            std::cout<<"Jbt: "<<Jb_t<<"\n";
-            std::cout<<"M_: "<<M_<<"\n";
-            std::cout<<"C_: "<<C_<<"\n";
-            std::cout<<"N_: "<<N_<<"\n";
-            std::cout<<"ddx: "<<(x0.block(6,0,6,1) - obj_t_Eigen)/h<<"\n";
-            std::cout<<"dx: "<<x0.block(6,0,6,1)<<"\n";
+            //std::cout<<"tau mpc: "<<tau_mpc<<"\n";
+            // std::cout<<"Jbt: "<<Jb_t<<"\n";
+            // std::cout<<"M_: "<<M_<<"\n";
+            // std::cout<<"C_: "<<C_<<"\n";
+            // std::cout<<"N_: "<<N_<<"\n";
+            //std::cout<<"ddx: "<<(x0.block(6,0,6,1) - obj_t_Eigen)/h<<"\n";
+            //std::cout<<"dx: "<<x0.block(6,0,6,1)<<"\n";
             // return 0;
             //modified [mpc parameters]
 //                double x = p.pos.x()+ 0.1*sin(2*t);
 //                p.pos.x() = x;
             des_cart_vel = KDL::Twist(KDL::Vector(p.vel[0], p.vel[1], p.vel[2]),KDL::Vector::Zero());
             des_cart_acc = KDL::Twist(KDL::Vector(p.acc[0], p.acc[1], p.acc[2]),KDL::Vector::Zero());
+
+
+            calculation_done = true;
+            
+
+
+            tau_msg.data[0] = tau_mpc[0];
+            tau_msg.data[1] = tau_mpc[1];
+            tau_msg.data[2] = tau_mpc[2];
+            tau_msg.data[3] = tau_mpc[3];
+            tau_msg.data[4] = tau_mpc[4];
+            tau_msg.data[5] = tau_mpc[5];
+            tau_msg.data[6] = tau_mpc[6];
+
+            joint_tor_pub.publish(tau_msg);
         }
         else
         {

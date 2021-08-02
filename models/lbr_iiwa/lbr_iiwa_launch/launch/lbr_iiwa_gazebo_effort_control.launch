@@ -2,6 +2,7 @@
 <launch>
 <!--Convenience launch file to start gazebo + control--> 
 
+<param name="/use_sim_time" value="true" />
 <!--The hardware_interface parameter determines which hardware inteface is used-->
 <include file="$(find lbr_iiwa_gazebo)/launch/lbr_iiwa_world.launch">
   <arg name="hardware_interface" value="hardware_interface/EffortJointInterface" />
