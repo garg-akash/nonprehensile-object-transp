@@ -45,6 +45,7 @@ KDLRobot::KDLRobot(KDL::Tree &robot_tree)
     q_max_.data <<  2.96,2.09,2.96,2.09,2.96,2.09,2.96; //2*M_PI, 2*M_PI;
     ikVelSol_ = new KDL::ChainIkSolverVel_wdls(chain_);
     ikSol_ = new KDL::ChainIkSolverPos_NR_JL(chain_, q_min_, q_max_, *fkSol_, *ikVelSol_);
+    // jntArray_out_ = KDL::JntArray(n_);
 }
 
 void KDLRobot::update(std::vector<double> _jnt_values, std::vector<double> _jnt_vel)
@@ -86,6 +87,7 @@ void KDLRobot::update(std::vector<double> _jnt_values, std::vector<double> _jnt_
     s_V_obj_ = s_V_ee_.RefPoint(s_p_ee_obj);
     b_V_obj_ = adjoint(obj_->getFrame().Inverse(), s_V_obj_);
     obj_->setBodyVelocity(b_V_obj_);
+    std::cout << "obj body vel in update: " << b_V_obj_ << std::endl;
     obj_->setSpatialVelocity(s_V_obj_);
     KDL::changeRefPoint(s_J_ee_, s_p_ee_obj, s_J_obj_);
     KDL::changeRefPoint(s_J_dot_ee_, s_p_ee_obj, s_J_dot_obj_);
@@ -223,6 +225,14 @@ Eigen::VectorXd KDLRobot::getID(const KDL::JntArray &q,
     return t;
 }
 
+KDL::JntArray KDLRobot::getInvKin(const KDL::JntArray &q,
+                        const KDL::Frame &eeFrame)
+{
+    KDL::JntArray jntArray_out_;
+    jntArray_out_.resize(chain_.getNrOfJoints());
+    ikSol_->CartToJnt(q, eeFrame, jntArray_out_);
+    return jntArray_out_;
+}
 ////////////////////////////////////////////////////////////////////////////////
 //                              END-EFFECTOR                                  //
 ////////////////////////////////////////////////////////////////////////////////

@@ -555,7 +555,7 @@ int main(int argc, char **argv)
     Eigen::VectorXd st_lbx = Eigen::VectorXd::Zero(n_states);
     st_lbx << -10,-10,-10,-M_PI,-M_PI/2,-M_PI,-5,-5,-5,-M_PI,-M_PI,-M_PI,9.8,Eigen::VectorXd::Zero(n_controls);
     Eigen::VectorXd st_ubx = Eigen::VectorXd::Zero(n_states);
-    st_ubx << 10,10,10,M_PI,M_PI/2,M_PI,5,5,5,M_PI,M_PI,M_PI,9.8,50*Eigen::VectorXd::Ones(n_controls);
+    st_ubx << 10,10,10,M_PI,M_PI/2,M_PI,5,5,5,M_PI,M_PI,M_PI,9.8,100*Eigen::VectorXd::Ones(n_controls);
     Eigen::VectorXd ct_lbx = -1000*Eigen::VectorXd::Ones(n_controls);
     Eigen::VectorXd ct_ubx = 1000*Eigen::VectorXd::Ones(n_controls);
     Eigen::VectorXd lbx(n_states+MPC_HORIZON*n_total);
@@ -637,7 +637,7 @@ int main(int argc, char **argv)
     Eigen::Matrix4d T_wb_current = Eigen::Matrix4d::Zero();
     Eigen::Matrix4d T_eb = Eigen::Matrix4d::Zero();
     fromKDLToEigen(ee_F_obj, T_eb);
-    KDL::Twist obj_t;
+    KDL::Twist obj_t, obj_t_update;
     Eigen::VectorXd obj_t_Eigen = Eigen::VectorXd::Zero(6);
     double t_tau_now = 0, t_tau_prev = 0; //time keeping for tau calculation
     double t_sh_now = 0, t_sh_prev = 0; //time keeping for shift function
@@ -687,7 +687,11 @@ int main(int argc, char **argv)
     // Retrieve initial simulation time
     ros::Time begin = ros::Time::now();
     ROS_INFO_STREAM_ONCE("Starting control loop ...");
-
+    t_tau_prev = (ros::Time::now()-begin).toSec();
+    // auto t_tau_prev = std::chrono::steady_clock::now();
+    double t_tau_diff = 0; //std::chrono::duration<double> t_tau_diff; 
+    KDL::JntArray jnt_ik_kdl, jnt_init_kdl; jnt_ik_kdl.resize(7);
+    std::vector<double> jnt_ik(7,0.0);
     while ((ros::Time::now()-begin).toSec() < 2*traj_duration + init_time_slot)
     {
         //unpauseGazebo.call(pauseSrv);
@@ -704,12 +708,21 @@ int main(int argc, char **argv)
         std::cout << "robot_state_available" << std::endl;
         // Update robot
         robot.update(jnt_pos, jnt_vel);
-
+        std::cout<<"Joint pos: "<<jnt_pos<<std::endl;
+        std::cout<<"Joint vel: "<<jnt_vel<<std::endl;
+        jnt_init_kdl = fromVecToKDL(jnt_pos);
+        std::cout<<"Joint init: "<<jnt_init_kdl.data<<std::endl;
+        jnt_ik_kdl = robot.getInvKin(jnt_init_kdl, robot.getEEFrame());
+        std::cout<<"Joint out: "<<jnt_ik_kdl.data<<std::endl;
+        jnt_ik = fromKDLToVec(jnt_ik_kdl);
+        std::cout<<"Joint ik: "<<jnt_ik<<std::endl;
         // Update time
         t = (ros::Time::now()-begin).toSec();
+        std::cout << "time: " << t << "\n";
         //modified [mpc parameters]
         obj_t = obj.getBodyVelocity();
         obj_t_Eigen << toEigen((obj_t.vel)), toEigen((obj_t.rot)); 
+        // obj_t_Eigen << toEigen((obj_t_update.vel)), toEigen((obj_t_update.rot)); 
         pVEC_ref.clear(); //empty the std vector to push back again
         // xx.clear();
         Jb = robot.getObjBodyJac().data;
@@ -720,25 +733,28 @@ int main(int argc, char **argv)
         Co = obj.getCoriolisMatrix();
         No = -obj.getGravity();
         // C_ = combinedC(robot.getJsim(),robot.getCoriolis(),Co,iJb,diJb);
+        C_ = Co;
         N_ = combinedN(-robot.getGravity(),No,iJb);
         // std::cout<<"#############M_m#################"<<robot.getJsim()<<std::endl;
-        // std::cout<<"#############C_m#################"<<robot.getCoriolis()<<std::endl;
-        // std::cout<<"#############N_m#################"<<-robot.getGravity()<<std::endl;
+        // std::cout<<"#############C_#################"<<C_<<std::endl;
+        // std::cout<<"#############No#################"<<No<<std::endl;
         //modified [mpc parameters]
         // Extract desired pose
         KDL::Frame des_pose = KDL::Frame::Identity();
         KDL::Twist des_cart_vel = KDL::Twist::Zero(), des_cart_acc = KDL::Twist::Zero();
         if (t < init_time_slot) // wait a second
         {
+            std::cout << "here!! " << "\n";
             p = planner.compute_trajectory(0.0);
         }
-        else if(t > init_time_slot && t <= traj_duration + init_time_slot)
+        else if(t >= init_time_slot && t <= traj_duration + init_time_slot)
         {
             p = planner.compute_trajectory(t-init_time_slot);
+            std::cout << "ok1" << std::endl;
             //modified [mpc parameters]
             for (int i = 0; i < MPC_HORIZON; ++i){
                 p_future[i] = planner.compute_trajectory(t+i*epsilon_t-init_time_slot);
-                // std::cout<<"p_future: "<<p_future[i].pos<<" "<<p_future[i].vel<<"\n";
+                std::cout<<"p_future: "<<p_future[i].pos<<" "<<p_future[i].vel<<"\n";
                 Eigen::Matrix<double, 6, 1> vel_ref = Eigen::Matrix<double, 6, 1>::Zero();
                 Eigen::Matrix<double, 6, 1> acc_ref = Eigen::Matrix<double, 6, 1>::Zero();
                 vel_ref << p_future[i].vel[0], p_future[i].vel[1], p_future[i].vel[2], 0, 0, 0;
@@ -754,16 +770,18 @@ int main(int argc, char **argv)
             pVEC_ref_ = Eigen::Map<Eigen::VectorXd>(pVEC_ref.data(), pVEC_ref.size());
             // Eigen matrices are stored in column major order by default
             pVEC << (Eigen::Map<Eigen::VectorXd>(M_.data(), M_.cols()*M_.rows())), 
-                    (Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())),
+                    (Eigen::Map<Eigen::VectorXd>(C_.data(), C_.cols()*C_.rows())),
                     N_,(Eigen::Map<Eigen::VectorXd>(Co.data(), Co.cols()*Co.rows())),
                     No,(Eigen::Map<Eigen::VectorXd>(Jb_t.data(), Jb_t.cols()*Jb_t.rows())),
                     x0,pVEC_ref_;
             // std::cout<<"pVEC updated "<<pVEC<<std::endl;
+            std::cout << "ok2" << std::endl;
             for (int i = 0; i < MPC_HORIZON+1; ++i)
             {
                 for (int j = 0; j < n_states; ++j)
                     args_x0(i*n_states+j) = X0(i,j);
             }
+            std::cout << "ok3" << std::endl;
             for (int i = 0; i < MPC_HORIZON; ++i)
             {
                 for (int j = 0; j < n_controls; ++j)
@@ -771,8 +789,10 @@ int main(int argc, char **argv)
             }
             args_x0_cas = toCasadi(args_x0); //this is extended x
             p_cas = toCasadi(pVEC);
+            std::cout << "ok4" << std::endl;
             arg = {args_x0_cas,p_cas,lbx_cas,ubx_cas,lbg_cas,ubg_cas,0,0};
             auto start = std::chrono::steady_clock::now();
+            std::cout << "ok5" << std::endl;
             res = solv(arg); //call the solver
             auto end = std::chrono::steady_clock::now();
             elapsed_seconds = end-start; 
@@ -809,6 +829,8 @@ int main(int argc, char **argv)
             // std::cout<<"u0 before shift"<<u0<<std::endl;
             t_sh_now = (ros::Time::now()-begin).toSec();
             shift((t_sh_now-t_sh_prev), t0, x0, u0, sol_ct_first, sol_ct_rest, sol_ct_last, rhs_eig);
+            std::cout << "shift time diff: " << (t_sh_now-t_sh_prev) << "\n";
+            std::cout << "shifted x0 pos: " << x0.block(0,0,3,1) << "\n";
             t_sh_prev = t_sh_now;
             // std::cout<<"x0 after shift"<<x0<<std::endl;
             // std::cout<<"u0 after shift"<<u0<<std::endl; 
@@ -863,8 +885,35 @@ int main(int argc, char **argv)
             x_prev = xx_out.row(mpciter).transpose();
             // tau_mpc = Jb.transpose()*(M_*(x0.block(6,0,6,1) - x_prev.block(6,0,6,1))/h + C_*x0.block(6,0,6,1) + N_);
             t_tau_now = (ros::Time::now()-begin).toSec();
-            tau_mpc = Jb_t*(M_*(x0.block(6,0,6,1) - obj_t_Eigen)/(t_tau_now-t_tau_prev) + C_*x0.block(6,0,6,1) + N_);
+            // auto t_tau_now = std::chrono::steady_clock::now();
+            t_tau_diff = t_tau_now-t_tau_prev;
+            std::cout << "time tau diff: " << t_tau_diff << "\n";
+            std::cout << "x0 vel: " << x0.block(6,0,6,1) << "\n";
+            std::cout << "obj t: " << obj_t_Eigen << "\n";
+            std::cout << "obj t spatial: " << obj.getSpatialVelocity() << "\n";
+            std::cout << "vel diff: " << (x0.block(6,0,6,1) - obj_t_Eigen) << "\n";
+
+            // if((t_tau_now-t_tau_prev) < 1e-6)
+            std::cout << "obj.getGravity(): " << obj.getGravity() << "\n";
+            std::cout << "iJb: " << iJb << "\n";
+            std::cout << "obj frame: " << obj.getFrame() << "\n";
+                tau_mpc = robot.getGravity();//Jb_t*combinedN(robot.getGravity(),obj.getGravity(),iJb);//Jb_t*N_;
+                // tau_mpc = robot.getGravity()+Jb_t*obj.getGravity();
+            /*else{    
+                tau_mpc = Jb_t*(M_*(x0.block(6,0,6,1) - obj_t_Eigen)/t_tau_diff + C_*x0.block(6,0,6,1) + N_);
+                std::cout << "Term1: " << M_*(x0.block(6,0,6,1) - obj_t_Eigen)/t_tau_diff << std::endl;
+                std::cout << "Term1a: " << M_ << std::endl;
+                std::cout << "Term1b: " << (x0.block(6,0,6,1) - obj_t_Eigen)/t_tau_diff << std::endl;
+                std::cout << "Term2: " << C_*x0.block(6,0,6,1) << std::endl;
+                std::cout << "Term3: " << N_ << std::endl;
+                std::cout << "Term4: " << Jb_t << std::endl;
+            }*/
             t_tau_prev = t_tau_now;
+            /*for(int i = 0; i < 6; ++i){
+              obj_t_update[i] = x0[6+i];
+              std::cout << "setting: " << x0[6+i] <<"\n";
+            }
+            obj.setBodyVelocity(obj_t_update);*/
             //std::cout<<"tau mpc: "<<tau_mpc<<"\n";
             // std::cout<<"Jbt: "<<Jb_t<<"\n";
             // std::cout<<"M_: "<<M_<<"\n";
@@ -897,6 +946,7 @@ int main(int argc, char **argv)
         }
         else
         {
+            // std::cout << "time: " << t << "\n";
             ROS_INFO_STREAM_ONCE("trajectory terminated");
         }
 

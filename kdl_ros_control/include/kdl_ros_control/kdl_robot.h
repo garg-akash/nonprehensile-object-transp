@@ -50,6 +50,9 @@ public:
                           const KDL::JntArray &q_dotdot,
                           const KDL::Wrenches &f_ext);
 
+    KDL::ChainIkSolverPos_NR_JL* ikSol_;
+    KDL::JntArray getInvKin(const KDL::JntArray &q,
+                            const KDL::Frame &eeFrame);
     // end-effector
     KDL::Frame getEEFrame();
     KDL::Twist getEEVelocity();
@@ -97,7 +100,7 @@ private:
     KDL::ChainFkSolverPos_recursive* fkSol_;
     KDL::ChainFkSolverVel_recursive* fkVelSol_;
     KDL::ChainJntToJacDotSolver* jntJacDotSol_;
-    KDL::ChainIkSolverPos_NR_JL* ikSol_;
+    // KDL::ChainIkSolverPos_NR_JL* ikSol_;
     KDL::ChainIkSolverVel_wdls* ikVelSol_;
 
     // joints
