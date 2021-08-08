@@ -483,6 +483,12 @@ int main(int argc, char **argv)
     // Add object
     robot.addObj(obj);
 
+    KDL::Frame ee_F_obj_init = robot.getEEFrame().Inverse()*obj.getFrame();
+    std::cout << "ee_F_obj_init: " << std::endl << ee_F_obj_init << std::endl;
+    KDL::Frame s_F_obj_const = KDL::Frame::Identity(); s_F_obj_const.p = obj.getFrame().p; // plate height
+    std::cout << "s_F_obj_const: " << std::endl << s_F_obj_const << std::endl;
+    std::cout << "s_F_ee_initial: " << std::endl << robot.getEEFrame() << std::endl;
+    KDL::Frame s_F_ee_ik;
     // Joints
     KDL::JntArray qd(robot.getNrJnts()),dqd(robot.getNrJnts()),ddqd(robot.getNrJnts());
 
@@ -692,6 +698,8 @@ int main(int argc, char **argv)
     double t_tau_diff = 0; //std::chrono::duration<double> t_tau_diff; 
     KDL::JntArray jnt_ik_kdl, jnt_init_kdl; jnt_ik_kdl.resize(7);
     std::vector<double> jnt_ik(7,0.0);
+    jnt_pos[0] = 0; jnt_pos[1] = 1.57; jnt_pos[2] = -1.57; jnt_pos[3] = -1.2;
+    jnt_pos[4] = 1.57; jnt_pos[5] = -1.57; jnt_pos[6] = 0;
     while ((ros::Time::now()-begin).toSec() < 2*traj_duration + init_time_slot)
     {
         //unpauseGazebo.call(pauseSrv);
@@ -707,15 +715,27 @@ int main(int argc, char **argv)
 
         std::cout << "robot_state_available" << std::endl;
         // Update robot
-        robot.update(jnt_pos, jnt_vel);
+        // robot.update(jnt_pos, jnt_vel);
         std::cout<<"Joint pos: "<<jnt_pos<<std::endl;
         std::cout<<"Joint vel: "<<jnt_vel<<std::endl;
         jnt_init_kdl = fromVecToKDL(jnt_pos);
         std::cout<<"Joint init: "<<jnt_init_kdl.data<<std::endl;
-        jnt_ik_kdl = robot.getInvKin(jnt_init_kdl, robot.getEEFrame());
+        std::cout << "FRame: " << robot.getEEFrame() << std::endl;
+        jnt_ik_kdl = robot.getInvKin(jnt_init_kdl, obj.getFrame());
         std::cout<<"Joint out: "<<jnt_ik_kdl.data<<std::endl;
         jnt_ik = fromKDLToVec(jnt_ik_kdl);
-        std::cout<<"Joint ik: "<<jnt_ik<<std::endl;
+        /*robot_init_config.request.joint_positions.push_back(jnt_ik[0]);
+        robot_init_config.request.joint_positions.push_back(jnt_ik[1]);
+        robot_init_config.request.joint_positions.push_back(jnt_ik[2]);
+        robot_init_config.request.joint_positions.push_back(jnt_ik[3]);
+        robot_init_config.request.joint_positions.push_back(jnt_ik[4]);
+        robot_init_config.request.joint_positions.push_back(jnt_ik[5]);
+        robot_init_config.request.joint_positions.push_back(jnt_ik[6]);
+        if(robot_set_state_srv.call(robot_init_config))
+            ROS_INFO("IK Robot state set.");
+        else
+            ROS_INFO("Failed to set ik robot state.");*/
+        // return 0;
         // Update time
         t = (ros::Time::now()-begin).toSec();
         std::cout << "time: " << t << "\n";
@@ -762,7 +782,33 @@ int main(int argc, char **argv)
                 tau_ref.block(i,0, 1, 7) = (Jb_t*(M_*acc_ref + C_*vel_ref + N_)).transpose(); //not exactly accurate ref as state of robot + obj is not updated  
                 Fb_star = obj.getMassMatrix()*acc_ref + Co*vel_ref + No;
                 lam_ref.block(i, 0, 1, 16) = (weightedPseudoInverse(Eigen::Matrix<double,16,16>::Identity(),G*Fc_hat)*Fb_star).transpose();
+                
+                s_F_obj_const.p[0] = p_future[i].pos[0]; s_F_obj_const.p[1] = p_future[i].pos[1]; 
+                s_F_obj_const.p[2] = p_future[i].pos[2];
+                s_F_ee_ik = s_F_obj_const*ee_F_obj_init.Inverse();
+                std::cout<<"sFeeIK: " << s_F_ee_ik << "\n";
+                jnt_ik_kdl = robot.getInvKin(jnt_init_kdl, s_F_obj_const);
+                // KDL::JntArray jnt_vel_ik_kdl;
+                // jnt_vel_ik_kdl.data = (jnt_ik_kdl.data - jnt_init_kdl.data)/epsilon_t;
+                std::cout<<"jnt ik: " << jnt_ik_kdl.data << "\n";
+                // std::cout<<"jnt vel ik: " << jnt_vel_ik_kdl.data << "\n";
+                jnt_init_kdl = jnt_ik_kdl;
             }
+            // std::vector<double> jnt_vel_ik_kdl(7,0.0);
+            // robot.update(fromKDLToVec(jnt_ik_kdl),jnt_vel_ik_kdl);
+            jnt_ik = fromKDLToVec(jnt_ik_kdl);
+            robot_init_config.request.joint_positions.push_back(jnt_ik[0]);
+            robot_init_config.request.joint_positions.push_back(jnt_ik[1]);
+            robot_init_config.request.joint_positions.push_back(jnt_ik[2]);
+            robot_init_config.request.joint_positions.push_back(jnt_ik[3]);
+            robot_init_config.request.joint_positions.push_back(jnt_ik[4]);
+            robot_init_config.request.joint_positions.push_back(jnt_ik[5]);
+            robot_init_config.request.joint_positions.push_back(jnt_ik[6]);
+            if(robot_set_state_srv.call(robot_init_config))
+                ROS_INFO("IK Robot state set 2.");
+            else
+                ROS_INFO("Failed to set ik robot state.");
+            return 0;
             // std::cout<<"tau_ref: "<<tau_ref<<std::endl; 
             // std::cout<<"lam_ref: "<<lam_ref<<std::endl;        
             oZYX << x0[4], x0[5], x0[6];

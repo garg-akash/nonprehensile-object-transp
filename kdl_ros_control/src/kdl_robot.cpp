@@ -44,7 +44,8 @@ KDLRobot::KDLRobot(KDL::Tree &robot_tree)
     q_min_.data << -2.96,-2.09,-2.96,-2.09,-2.96,-2.09,-2.96; //-2*M_PI,-2*M_PI;//
     q_max_.data <<  2.96,2.09,2.96,2.09,2.96,2.09,2.96; //2*M_PI, 2*M_PI;
     ikVelSol_ = new KDL::ChainIkSolverVel_wdls(chain_);
-    ikSol_ = new KDL::ChainIkSolverPos_NR_JL(chain_, q_min_, q_max_, *fkSol_, *ikVelSol_);
+    ikVelSol_pinv_ = new KDL::ChainIkSolverVel_pinv(chain_);
+    ikSol_ = new KDL::ChainIkSolverPos_NR_JL(chain_, q_min_, q_max_, *fkSol_, *ikVelSol_pinv_);
     // jntArray_out_ = KDL::JntArray(n_);
 }
 

@@ -102,6 +102,7 @@ private:
     KDL::ChainJntToJacDotSolver* jntJacDotSol_;
     // KDL::ChainIkSolverPos_NR_JL* ikSol_;
     KDL::ChainIkSolverVel_wdls* ikVelSol_;
+    KDL::ChainIkSolverVel_pinv* ikVelSol_pinv_; 
 
     // joints
     void updateJnts(std::vector<double> _jnt_values, std::vector<double> _jnt_vel);
