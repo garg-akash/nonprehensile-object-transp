@@ -47,7 +47,7 @@ bool sim_ready = false;
 Eigen::Matrix3d obj_inertia = Eigen::Matrix3d::Identity();
 const int n_states = 21;
 const int n_controls = 7;
-const int MPC_HORIZON = 3;
+const int MPC_HORIZON = 2;
 const int n_jnts = 7;
 //MPC Fucntions
 Eigen::MatrixXd combinedM(const Eigen::MatrixXd &M_m, const Eigen::MatrixXd &M_o, const Eigen::MatrixXd &iJb)//,iJb,M_m);
@@ -305,15 +305,15 @@ int main(int argc, char **argv)
     int n_total = n_states + n_controls;
     int mpciter = 0;
     float t0 = 0;
-    float h = 0.1;
+    float h = 0.01;
     std::vector<float> t_mpc;
     t_mpc.push_back(t0);
     float epsilon_t = 1e-3;
     //include solver
-    std::string path = std::string(nlpN3_PATH);
-    std::cout << "Library to load: " << path + "/nlpN3.so\n";
-    casadi::Function solv = casadi::nlpsol("solv", "ipopt", path + "/nlpN3.so"); //loading solver
-    casadi::Function fDYN = casadi::external("f"); //loading the dynamics fucntion
+    std::string path = std::string(nlpN3_man_PATH);
+    std::cout << "Library to load: " << path + "/nlpN2_man.so\n";
+    casadi::Function solv = casadi::nlpsol("solv", "ipopt", path + "/nlpN2_man.so"); //loading solver
+    casadi::Function fDYN = casadi::external("f_man"); //loading the dynamics fucntion
     //modified [mpc parameters]
     // Subscribers
     ros::Subscriber joint_state_sub = n.subscribe("/lbr_iiwa/joint_states", 0, jointStateCallback);
@@ -604,8 +604,7 @@ int main(int argc, char **argv)
     t_mpc[mpciter+1] = t0;
     casadi::DM sol_ct_first_cas;
     casadi::DM x0_cas;
-    casadi::DM C_m_cas;
-    casadi::DM N_m_cas;
+    casadi::DM M_m_cas, C_m_cas, N_m_cas;
     std::vector<casadi::DM> argF;
     std::vector<casadi::DM> f_value; //call the dynamic fucntion
     casadi::DM rhs_cas;
@@ -647,6 +646,7 @@ int main(int argc, char **argv)
     ros::Time begin = ros::Time::now();
     ROS_INFO_STREAM_ONCE("Starting control loop ...");
     t_tau_prev = (ros::Time::now()-begin).toSec();
+    t_sh_prev = (ros::Time::now()-begin).toSec();
     // auto t_tau_prev = std::chrono::steady_clock::now();
     double t_tau_diff = 0; //std::chrono::duration<double> t_tau_diff; 
     KDL::JntArray jnt_ik_kdl, jnt_init_kdl; jnt_ik_kdl.resize(7);
@@ -677,10 +677,7 @@ int main(int argc, char **argv)
         pVEC_ref.clear(); //empty the std vector to push back again
         M_m = robot.getJsim();
         C_m = robot.getCoriolis();
-        N_m = -robot.getGravity();
-        // std::cout<<"#############M_m#################"<<robot.getJsim()<<std::endl;
-        // std::cout<<"#############C_#################"<<C_<<std::endl;
-        // std::cout<<"#############No#################"<<No<<std::endl;
+        N_m = robot.getGravity();
         //modified [mpc parameters]
         // Extract desired pose
         KDL::Frame des_pose = KDL::Frame::Identity();
@@ -730,7 +727,6 @@ int main(int argc, char **argv)
                     pVEC_ref_;
             // std::cout<<"pVEC updated "<<pVEC<<std::endl;
             std::cout << "ok2" << std::endl;
-            return 0;
             for (int i = 0; i < MPC_HORIZON+1; ++i)
             {
                 for (int j = 0; j < n_states; ++j)
@@ -751,8 +747,15 @@ int main(int argc, char **argv)
             res = solv(arg); //call the solver
             auto end = std::chrono::steady_clock::now();
             elapsed_seconds = end-start; 
+            std::cout<<"#############args.x0#################"<<args_x0<<std::endl;
+            std::cout<<"#############args.p#################"<<pVEC<<std::endl;
+            std::cout<<"#############args.lbx#################"<<lbx<<std::endl;
+            std::cout<<"#############args.ubx#################"<<ubx<<std::endl;
+            std::cout<<"#############args.lbg#################"<<lbg<<std::endl;
+            std::cout<<"#############args.ubg#################"<<ubg<<std::endl;
             std::cout << "elapsed time: " << elapsed_seconds.count() << "s\n";
             std::cout << "Objective at solution = " << res.at(1) << std::endl;
+            std::cout << "Solution at 0 = " << res.at(0) << std::endl;
             sol_cas = res.at(0); //solution from the solver
             // convert solution for casadi to eigen
             auto sol_vec = static_cast<std::vector<double>>(sol_cas);
@@ -772,21 +775,26 @@ int main(int argc, char **argv)
             sol_ct_first_cas = toCasadi(sol_ct_first);
             x0_cas = toCasadi(x0);
             // C_m_cas = toCasadi((Eigen::Map<Eigen::VectorXd>(C_m.data(), C_m.cols()*C_m.rows())));
+            M_m_cas = toCasadi((Eigen::Map<Eigen::VectorXd>(M_m.data(), M_m.cols()*M_m.rows())));
             C_m_cas = toCasadi(C_m); //here we are taking 7x1 vector
             N_m_cas = toCasadi(N_m);
             std::cout<<"sol first: "<<sol_ct_first<<std::endl;
-            argF = {x0_cas,sol_ct_first_cas,C_m_cas,N_m_cas};
+            std::cout<<"#############x0#################"<<x0<<std::endl;
+            std::cout<<"#############M_m#################"<<M_m<<std::endl;
+            std::cout<<"#############C_m#################"<<C_m<<std::endl;
+            std::cout<<"#############N_m#################"<<N_m<<std::endl;
+            argF = {x0_cas,sol_ct_first_cas,M_m_cas,C_m_cas,N_m_cas};
             f_value = fDYN(argF); //call the dynamic fucntion
             rhs_cas = f_value.at(0);
             // convert from casadi to eigen
             auto rhs_vec = static_cast<std::vector<double>>(rhs_cas);
             Eigen::Matrix<double, n_states, 1> rhs_eig(rhs_vec.data());
-            // std::cout<<"rhs: "<<rhs_eig<<std::endl;
+            std::cout<<"rhs: "<<rhs_eig<<std::endl; return 0;
             // std::cout<<"u0 before shift"<<u0<<std::endl;
             t_sh_now = (ros::Time::now()-begin).toSec();
             shift((t_sh_now-t_sh_prev), t0, x0, u0, sol_ct_first, sol_ct_rest, sol_ct_last, rhs_eig);
             std::cout << "shift time diff: " << (t_sh_now-t_sh_prev) << "\n";
-            std::cout << "shifted x0 pos: " << x0.block(0,0,3,1) << "\n";
+            std::cout << "shifted x0: " << x0 << "\n"; 
             t_sh_prev = t_sh_now;
             // std::cout<<"x0 after shift"<<x0<<std::endl;
             // std::cout<<"u0 after shift"<<u0<<std::endl; 
