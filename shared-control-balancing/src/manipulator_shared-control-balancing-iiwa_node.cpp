@@ -771,7 +771,8 @@ int main(int argc, char **argv)
             t_mpc[mpciter+1] = t0;
             sol_ct_first_cas = toCasadi(sol_ct_first);
             x0_cas = toCasadi(x0);
-            C_m_cas = toCasadi((Eigen::Map<Eigen::VectorXd>(C_m.data(), C_m.cols()*C_m.rows())));
+            // C_m_cas = toCasadi((Eigen::Map<Eigen::VectorXd>(C_m.data(), C_m.cols()*C_m.rows())));
+            C_m_cas = toCasadi(C_m); //here we are taking 7x1 vector
             N_m_cas = toCasadi(N_m);
             std::cout<<"sol first: "<<sol_ct_first<<std::endl;
             argF = {x0_cas,sol_ct_first_cas,C_m_cas,N_m_cas};
@@ -799,58 +800,16 @@ int main(int argc, char **argv)
             X0 << X0.block(1,0,MPC_HORIZON,n_states), X0.block(MPC_HORIZON-1,0,1,n_states);
             std::cout<<"mpciter: "<<mpciter<<"\n";
             mpciter += 1;
-            // std::cout<<"xx_out: "<<xx_out<<"\n";
-
-            //compute torque using IK
-            // oZYX << x0[4], x0[5], x0[6];
-            // R_wb_current = zyx2R(oZYX);
-            // for (int i = 0; i < 3; ++i)
-            // {
-            //     for (int j = 0; j < 3; ++j)
-            //         T_wb_current(i,j) = R_wb_current(i,j); 
-            // }
-            // T_wb_current(0,3) = x0[0]; T_wb_current(1,3) = x0[1]; T_wb_current(2,3) = x0[2];
-            // T_wb_current(3,3) = 1;
-            // T_we_current = T_wb_current*T_eb.inverse();
-            // R_we = R_wb_current*R_eb.inverse();
-            // // tf::transformEigenToKDL(T_wb_current, T_we_kdl);
-            // fromEigenToKDL(T_we_current, T_we_kdl); 
-            // ikSol_->CartToJnt(q_prev,T_we_kdl,q_new);
-            // q_new = LWR.ikcon(T_we_current,q_prev');
-            // q_current_op = q_new'; 
-            // q_log = [q_log q_current_op];
-            // %     dq_current = (q_current-q_prev)/h;
-            // robot.update(fromKDLToVec(q_new),fromKDLToVec(dq_prev));
-            // // Je_current = LWR.jacob0(q_current_op');
-            // // %Je_current = computeJe(d3,d5,d7,q_current_op);
-            // // R_we = R_wb_current*R_eb'; %rotation of ee frame wrt world frame
-            // Jb = robot.getObjBodyJac().data;
-            // iJb = weightedPseudoInverse(Eigen::Matrix<double,7,7>::Identity(),Jb);
-            // // Jb = Ad_eb\(blkdiag(R_we',R_we')*Je_current);
-            // // iJb = pinv(Jb); diJb = zeros(7,6);
-            // dq_new = iJb*x0.block(6,0,6,1);
-            // // dq_current_op = pinv(Jb)*x0(7:12);
-            // // dq_log = [dq_log dq_current_op]; %vel output of MPC is already in B frame
-            // // //IK part finishes
-            // M_ = combinedM(robot.getJsim(),obj.getMassMatrix(),iJb);//,iJb,M_m);
-            // Co = obj.getCoriolisMatrix();
-            // No = obj.getGravity();
-            // // C_ = combinedC(robot.getJsim(),robot.getCoriolis(),Co,iJb,diJb);
-            // N_ = combinedN(robot.getGravity(),No,iJb);
+            
             x_prev = xx_out.row(mpciter).transpose();
             // tau_mpc = Jb.transpose()*(M_*(x0.block(6,0,6,1) - x_prev.block(6,0,6,1))/h + C_*x0.block(6,0,6,1) + N_);
             t_tau_now = (ros::Time::now()-begin).toSec();
             // auto t_tau_now = std::chrono::steady_clock::now();
             t_tau_diff = t_tau_now-t_tau_prev;
-            std::cout << "time tau diff: " << t_tau_diff << "\n";
-            std::cout << "x0 vel: " << x0.block(6,0,6,1) << "\n";
             // std::cout << "vel diff: " << (x0.block(6,0,6,1) - obj_t_Eigen) << "\n";
 
             // if((t_tau_now-t_tau_prev) < 1e-6)
-            std::cout << "obj.getGravity(): " << obj.getGravity() << "\n";
-            std::cout << "obj frame: " << obj.getFrame() << "\n";
-                tau_mpc = robot.getGravity();//Jb_t*combinedN(robot.getGravity(),obj.getGravity(),iJb);//Jb_t*N_;
-                // tau_mpc = robot.getGravity()+Jb_t*obj.getGravity();
+                tau_mpc = x0.block(0,0,7,1); 
             /*else{    
                 tau_mpc = Jb_t*(M_*(x0.block(6,0,6,1) - obj_t_Eigen)/t_tau_diff + C_*x0.block(6,0,6,1) + N_);
                 std::cout << "Term1: " << M_*(x0.block(6,0,6,1) - obj_t_Eigen)/t_tau_diff << std::endl;
