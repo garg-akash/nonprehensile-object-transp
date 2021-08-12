@@ -248,12 +248,6 @@ void objectStateCallback(const gazebo_msgs::LinkStates & msg)
 }
 
 
-void synchCallback( std_msgs::Bool msg ) {
-
-    robot_state_available = (calculation_done && msg.data);
-}
-
-
 void jointStateCallback(const sensor_msgs::JointState & msg)
 {
 
@@ -328,8 +322,7 @@ int main(int argc, char **argv)
     casadi::Function fDYN = casadi::external("f"); //loading the dynamics fucntion
     //modified [mpc parameters]
     // Subscribers
-    ros::Subscriber joint_state_sub = n.subscribe("/lbr_iiwa/joint_states", 0, jointStateCallback);
-    ros::Subscriber synch_sub = n.subscribe("/mpc/sync", 1, synchCallback);
+    ros::Subscriber joint_state_sub = n.subscribe("/lbr_iiwa/joint_states", 1, jointStateCallback);
     ros::Subscriber object_state_sub = n.subscribe("/gazebo/link_states", 1, objectStateCallback);
     //ros::ServiceServer service = n.advertiseService("get_torques", gettorques);
     ros::ServiceServer service = n.advertiseService("start_calc", start_calc);
@@ -447,14 +440,14 @@ int main(int argc, char **argv)
     // Wait for robot and object state
     // unpauseGazebo.call(pauseSrv);
     calculation_done = true;
-    while(!robot_state_available ) // || !obj_state_available)
+    while(!(sim_ready && robot_state_available)) // || !obj_state_available)
     {
         ROS_INFO_STREAM_ONCE("Robot/object state not available yet.");
         ROS_INFO_STREAM_ONCE("Please start gazebo simulation.");
         ros::spinOnce();
 
     }
-    robot_state_available = false;
+    // robot_state_available = false;
 
     //pauseGazebo.call(pauseSrv);
 
@@ -488,6 +481,7 @@ int main(int argc, char **argv)
     KDL::Frame s_F_obj_const = KDL::Frame::Identity(); s_F_obj_const.p = obj.getFrame().p; // plate height
     std::cout << "s_F_obj_const: " << std::endl << s_F_obj_const << std::endl;
     std::cout << "s_F_ee_initial: " << std::endl << robot.getEEFrame() << std::endl;
+
     KDL::Frame s_F_ee_ik;
     // Joints
     KDL::JntArray qd(robot.getNrJnts()),dqd(robot.getNrJnts()),ddqd(robot.getNrJnts());
@@ -808,7 +802,7 @@ int main(int argc, char **argv)
                 ROS_INFO("IK Robot state set 2.");
             else
                 ROS_INFO("Failed to set ik robot state.");
-            return 0;
+            // return 0;
             // std::cout<<"tau_ref: "<<tau_ref<<std::endl; 
             // std::cout<<"lam_ref: "<<lam_ref<<std::endl;        
             oZYX << x0[4], x0[5], x0[6];
@@ -943,7 +937,7 @@ int main(int argc, char **argv)
             std::cout << "obj.getGravity(): " << obj.getGravity() << "\n";
             std::cout << "iJb: " << iJb << "\n";
             std::cout << "obj frame: " << obj.getFrame() << "\n";
-                tau_mpc = robot.getGravity();//Jb_t*combinedN(robot.getGravity(),obj.getGravity(),iJb);//Jb_t*N_;
+                tau_mpc = Jb_t*combinedN(robot.getGravity(),obj.getGravity(),iJb);//Jb_t*N_;
                 // tau_mpc = robot.getGravity()+Jb_t*obj.getGravity();
             /*else{    
                 tau_mpc = Jb_t*(M_*(x0.block(6,0,6,1) - obj_t_Eigen)/t_tau_diff + C_*x0.block(6,0,6,1) + N_);
