@@ -256,6 +256,7 @@ void jointStateCallback(const sensor_msgs::JointState & msg)
         jnt_vel.push_back(msg.velocity[i]);
     }
     sim_ready = true;
+    ROS_INFO("read the joint state");
 }
 
 
@@ -312,9 +313,12 @@ int main(int argc, char **argv)
     float epsilon_t = 1e-2;
     //include solver
     std::string path = std::string(nlpN3_man_PATH);
-    std::cout << "Library to load: " << path + "/nlpN2_man.so\n";
-    casadi::Function solv = casadi::nlpsol("solv", "ipopt", path + "/nlpN3_man.so"); //loading solver
-    // casadi::Function solv = casadi::external("nlpN2_man.so"); //loading solver
+    std::cout << "Library to load: " << path + "/nlpN3_man.so\n";
+    /*casadi::FileDeserializer fs("solver.opts");
+    casadi::Dict opts = fs.update_dict();*/
+    // casadi::Function solv = casadi::nlpsol("solv", "ipopt", path + "/nlpN3_man.so"); //loading solver
+    casadi::Function solv= casadi::Function::load(path + "/solver.casadi"); //takes longer time for solver computation
+    // casadi::Function solv = casadi::external("nlpN2_man.so"); //cannot be used for ipopt----not codegenerated
     casadi::Function fDYN = casadi::external("f_man"); //loading the dynamics fucntion
     //modified [mpc parameters]
     // Subscribers
@@ -488,6 +492,7 @@ int main(int argc, char **argv)
     jnt_pos = fromKDLToVec(jnt_ik_kdl);
     robot.update(jnt_pos, jnt_vel);
     std::cout << "Jnt pos after " << jnt_pos << std::endl;
+    jnt_init_kdl = fromVecToKDL(jnt_pos);
     KDL::Frame s_F_ee_ik;
     // Joints
     KDL::JntArray qd(robot.getNrJnts()),dqd(robot.getNrJnts()),ddqd(robot.getNrJnts());
@@ -553,7 +558,7 @@ int main(int argc, char **argv)
 
     std::vector<double> pVEC_ref; //std vector because we want to push x0 u0 alternately
     Eigen::VectorXd pVEC_ref_; //to keep converted std vector to eigen vector
-    Eigen::VectorXd pVEC(63+n_states+MPC_HORIZON*n_total); //to keep the entire p argument
+    Eigen::VectorXd pVEC(63+4+n_states+MPC_HORIZON*n_total); //to keep the entire p argument
     // bounds for states and controls
     Eigen::VectorXd st_lbx = Eigen::VectorXd::Zero(n_states);
     st_lbx << -500*Eigen::VectorXd::Ones(7), -2.96,-2.09,-2.96,-2.09,-2.96,-2.09,-2.96, -100*Eigen::VectorXd::Ones(7);
@@ -592,13 +597,18 @@ int main(int argc, char **argv)
             ubg(i*n_states+j) = st_ubg(j);
         }
     }
+    Eigen::VectorXd lam_x0 = Eigen::VectorXd::Zero(n_states+MPC_HORIZON*n_total);
+    Eigen::VectorXd lam_g0 = Eigen::VectorXd::Zero((MPC_HORIZON+1)*n_states);
+
     casadi::DM args_x0_cas; //to keep converted quantities from eigen to casadi
     casadi::DM p_cas;
     casadi::DM lbx_cas = toCasadi(lbx);
     casadi::DM ubx_cas = toCasadi(ubx);
     casadi::DM lbg_cas = toCasadi(lbg);
     casadi::DM ubg_cas = toCasadi(ubg);
-    
+    casadi::DM lam_x0_cas = toCasadi(lam_x0);
+    casadi::DM lam_g0_cas = toCasadi(lam_g0);
+
     std::vector<casadi::DM> arg;
     std::vector<casadi::DM> res;
     std::chrono::duration<double> elapsed_seconds; 
@@ -660,7 +670,8 @@ int main(int argc, char **argv)
     t_sh_prev = (ros::Time::now()-begin).toSec();
     // auto t_tau_prev = std::chrono::steady_clock::now();
     double t_tau_diff = 0; //std::chrono::duration<double> t_tau_diff; 
-    
+    std::vector<double> GAINS(4,0.0);
+    GAINS[0] = 1e-3; GAINS[1] = 100; GAINS[2] = 10; GAINS[3] = 1e-3; //(Q_tau, Q_q, Q_dq, R)
     std::vector<double> jnt_ik(7,0.0);
     while ((ros::Time::now()-begin).toSec() < 2*traj_duration + init_time_slot)
     {
@@ -684,7 +695,6 @@ int main(int argc, char **argv)
         robot.update(jnt_pos, jnt_vel);
         std::cout<<"Joint pos: "<<jnt_pos<<std::endl;
         std::cout<<"Joint vel: "<<jnt_vel<<std::endl;
-        jnt_init_kdl = fromVecToKDL(jnt_pos);
         // Update time
         t = (ros::Time::now()-begin).toSec();
         std::cout << "time: " << t << "\n";
@@ -740,6 +750,7 @@ int main(int argc, char **argv)
             pVEC << (Eigen::Map<Eigen::VectorXd>(M_m.data(), M_m.cols()*M_m.rows())), 
                     C_m,
                     N_m,
+                    (Eigen::Map<Eigen::VectorXd>(GAINS.data(), GAINS.size())),
                     x0,
                     pVEC_ref_;
             // std::cout<<"pVEC updated "<<pVEC<<std::endl;
@@ -758,15 +769,17 @@ int main(int argc, char **argv)
             args_x0_cas = toCasadi(args_x0); //this is extended x
             p_cas = toCasadi(pVEC);
             std::cout << "ok4" << std::endl;
-            arg = {args_x0_cas,p_cas,lbx_cas,ubx_cas,lbg_cas,ubg_cas,0,0};
+            arg = {args_x0_cas,p_cas,lbx_cas,ubx_cas,lbg_cas,ubg_cas,lam_x0_cas,lam_g0_cas};
             auto start = std::chrono::steady_clock::now();
             std::cout << "ok5" << std::endl;
-            /*std::cout<<"#############args.x0#################"<<args_x0_cas<<std::endl;
+            if (mpciter == 22) {
+            std::cout<<"#############args.x0#################"<<args_x0_cas<<std::endl;
             std::cout<<"#############args.p#################"<<p_cas<<std::endl;
             std::cout<<"#############args.lbx#################"<<lbx_cas<<std::endl;
             std::cout<<"#############args.ubx#################"<<ubx_cas<<std::endl;
             std::cout<<"#############args.lbg#################"<<lbg_cas<<std::endl;
-            std::cout<<"#############args.ubg#################"<<ubg_cas<<std::endl;*/
+            std::cout<<"#############args.ubg#################"<<ubg_cas<<std::endl;
+            }
             res = solv(arg); //call the solver
             auto end = std::chrono::steady_clock::now();
             elapsed_seconds = end-start; 
@@ -798,6 +811,7 @@ int main(int argc, char **argv)
             std::cout<<"#############sol_ct_first_cas#################"<<sol_ct_first_cas<<std::endl;
             argF = {x0_cas,sol_ct_first_cas,M_m_cas,C_m_cas,N_m_cas};
             f_value = fDYN(argF); //call the dynamic fucntion
+            std::cout << "ok6" << std::endl;
             rhs_cas = f_value.at(0);
             // convert from casadi to eigen
             auto rhs_vec = static_cast<std::vector<double>>(rhs_cas);
@@ -806,8 +820,11 @@ int main(int argc, char **argv)
             // std::cout<<"u0 before shift"<<u0<<std::endl;
             t_sh_now = (ros::Time::now()-begin).toSec();
             shift(epsilon_t, t0, x0, u0, sol_ct_first, sol_ct_rest, sol_ct_last, rhs_eig);
+            /***use x0 as read from simulator***/
             std::cout << "shift time diff: " << (t_sh_now-t_sh_prev) << "\n";            
-            t_sh_prev = t_sh_now;
+            std::cout << "shift time now: " << (t_sh_now) << "\n";            
+            std::cout << "shift time prev: " << (t_sh_prev) << "\n";            
+            t_sh_prev = t_sh_now; 
             // std::cout<<"x0 after shift"<<x0<<std::endl;
             // std::cout<<"u0 after shift"<<u0<<std::endl; 
             for (int i = 0; i < n_states; ++i)
