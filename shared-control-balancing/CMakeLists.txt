@@ -11,6 +11,7 @@ find_package(catkin REQUIRED COMPONENTS roscpp rospy std_msgs genmsg eigen_conve
 find_package(Eigen3 REQUIRED)
 
 set (nlpN3_PATH "\"${PROJECT_SOURCE_DIR}\"")
+set (nlpN3_man_PATH "\"${PROJECT_SOURCE_DIR}\"")
 
 configure_file (
   "${PROJECT_SOURCE_DIR}/config.h.in"
